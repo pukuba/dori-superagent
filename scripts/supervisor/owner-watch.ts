@@ -35,6 +35,37 @@ async function screenOf(sys: Sys, address: string): Promise<string | undefined> 
 
 const minutes = (ms: number): number => Math.floor(ms / 60_000);
 
+type OwnerWait = {
+  since?: number;
+  where?: string;
+  messages?: readonly { at: number; where: string; text: string }[];
+};
+
+/**
+ * The limit is gone but the owner still waits: the turns that failed under it consumed his messages, so they are put
+ * back into the lead's inbox once. DELIVERED or QUEUED counts as done; anything else is retried on the next pass.
+ */
+async function replay(
+  sys: Sys,
+  p: Paths,
+  o: NonNullable<State["owner"]>,
+  w: OwnerWait,
+  since: number,
+): Promise<string> {
+  const lines = (w.messages ?? []).map(
+    (m) => `- ${new Date(m.at).toISOString()} ${m.where}: ${JSON.stringify(m.text)}`,
+  );
+  const text = `[missed during limit] Your provider limit has cleared, but these messages from the owner arrived while your turns were failing and are still unanswered (waiting since ${new Date(since).toISOString()}). Answer him now where he wrote:\n${lines.join("\n") || `- (text not recorded) ${w.where ?? ""}`}`;
+  const r = await sys.run([p.bun, join(p.repo, "src", "cli.ts"), "send", "lead", "--text", text], {
+    DORI_HOME: p.home,
+  });
+  const reply = `${r.out}\n${r.err}`;
+  if (!/^(DELIVERED|QUEUED) /m.test(reply))
+    return `WARN replay of missed owner messages failed (exit ${r.code}): ${reply.trim().split("\n")[0] ?? ""}`;
+  o.replayedFor = since;
+  return `REPLAY ${(w.messages ?? []).length} owner message(s) missed during a provider limit to the lead`;
+}
+
 /**
  * The owner wrote (Slack or Telegram) and yena has not posted since: past OWNER_WAIT_MS the owner hears it on Telegram,
  * rate-limited. `stuck` is set, once per wait, when the live lead's screen has not changed for STUCK_MS and shows no
@@ -47,7 +78,7 @@ export async function watchOwner(
   lead: Term | undefined,
   now: number,
 ): Promise<{ actions: string[]; stuck?: string }> {
-  const w = readJson<{ since?: number; where?: string }>(join(stateDirOf(p, sys.env), "owner-wait.json"), {});
+  const w = readJson<OwnerWait>(join(stateDirOf(p, sys.env), "owner-wait.json"), {});
   st.owner ??= {};
   const o = st.owner;
   if (w.since === undefined || now - w.since < OWNER_WAIT_MS) {
@@ -80,6 +111,11 @@ export async function watchOwner(
     actions.push(
       `ALERT owner unanswered for ${minutes(waited)}m${limited ? " (lead shows a provider limit)" : ""}: ${result}`,
     );
+  }
+  if (limited) o.limitedFor = w.since;
+  else if (lead && screen !== undefined && o.limitedFor === w.since && o.replayedFor !== w.since) {
+    actions.push(await replay(sys, p, o, w, w.since));
+    return { actions };
   }
   const still = screen !== undefined && o.screenSince !== undefined ? now - o.screenSince : 0;
   if (!lead || limited || o.relaunchedFor === w.since || still < STUCK_MS) return { actions };

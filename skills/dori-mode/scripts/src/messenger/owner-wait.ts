@@ -7,7 +7,16 @@ import type { TgInbound } from "./telegram-inbound.ts";
  * `<stateDir>/owner-wait.json`: since when the owner's oldest unanswered message has waited, and where it was sent. The
  * inbound listeners start the wait, `dori send` ends it, and the supervisor alerts the owner when it runs too long.
  */
-type OwnerWait = { readonly since?: number; readonly where?: string; readonly repliedAt?: number };
+type Said = { readonly at: number; readonly where: string; readonly text: string };
+type OwnerWait = {
+  readonly since?: number;
+  readonly where?: string;
+  /** What the owner wrote during this wait (the last KEEP messages), for the supervisor to replay after a limit. */
+  readonly messages?: readonly Said[];
+  readonly repliedAt?: number;
+};
+
+const KEEP = 10;
 
 const fileOf = (stateDir: string): string => join(stateDir, "owner-wait.json");
 
@@ -26,11 +35,12 @@ const save = (file: string, w: OwnerWait): void => {
   renameSync(tmp, file);
 };
 
-/** The owner wrote: a wait starts, unless one is already running (the oldest unanswered message is what counts). */
-export const ownerSpoke = (stateDir: string, where: string, now: number = Date.now()): void => {
+/** The owner wrote: a wait starts unless one is running (the oldest unanswered message counts), and the text is kept. */
+export const ownerSpoke = (stateDir: string, where: string, text: string, now: number = Date.now()): void => {
   const file = fileOf(stateDir);
   const w = load(file);
-  if (w.since === undefined) save(file, { ...w, since: now, where });
+  const messages = [...(w.since === undefined ? [] : (w.messages ?? [])), { at: now, where, text: text.slice(0, 500) }];
+  save(file, { since: w.since ?? now, where: w.where ?? where, messages: messages.slice(-KEEP) });
 };
 
 /** yena posted a message: whatever the owner was waiting on has an answer. */

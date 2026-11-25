@@ -148,7 +148,7 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
     (i) => {
       console.log(formatTelegramInbound(i));
       const where = telegramOwnerWhere(i, ownerId);
-      if (where) ownerSpoke(stateDir, where);
+      if (where) ownerSpoke(stateDir, where, i.text ?? (i.media ? `[${i.media.kind}]` : ""));
     },
     (m) => console.log(`WARN ${m}`.slice(0, 300)),
   );
@@ -177,7 +177,7 @@ const inbound: Command = async ({ key, loopMinutes, config }) => {
         `INBOUND ${i.source} ${i.channel} ${i.threadTs ?? "-"} ${i.ts || "-"} ${i.user ?? "-"} ${JSON.stringify((i.text ?? "").slice(0, 200))}`,
       );
       const where = slackOwnerWhere(i, owner);
-      if (where) ownerSpoke(config.stateDir, where);
+      if (where) ownerSpoke(config.stateDir, where, i.text ?? "");
     }
   });
 };

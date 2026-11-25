@@ -14,8 +14,16 @@ export type State = {
   /** Where each role last ran, so a relaunch opens in the same directory `dori up` was given. */
   cwd?: Partial<Record<Role, string>>;
   nudgedAt?: number;
-  /** The owner-wait watch: the wait last alerted and when, the wait whose lead was replaced, the lead's screen and since when. */
-  owner?: { alertedFor?: number; alertAt?: number; relaunchedFor?: number; screen?: string; screenSince?: number };
+  /** The owner-wait watch, each keyed by the wait's start: alerted (and when), lead replaced, limit seen, missed replayed; the screen. */
+  owner?: {
+    alertedFor?: number;
+    alertAt?: number;
+    relaunchedFor?: number;
+    limitedFor?: number;
+    replayedFor?: number;
+    screen?: string;
+    screenSince?: number;
+  };
   lastSummary?: string;
   lastLogAt?: number;
 };

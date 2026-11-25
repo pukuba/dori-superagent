@@ -16,7 +16,10 @@ const MIN = 60_000;
 /** The owner's message arrived `ago` ms before the machine's clock; undefined `ago` means yena has replied. */
 const ownerWaiting = (ago: number | undefined, where = "Slack C1 thread 1.2") => {
   mkdirSync(join(home, "state"), { recursive: true });
-  const w = ago === undefined ? { repliedAt: m.clock } : { since: m.clock - ago, where };
+  const w =
+    ago === undefined
+      ? { repliedAt: m.clock }
+      : { since: m.clock - ago, where, messages: [{ at: m.clock - ago, where, text: "너 왜 사라짐" }] };
   writeFileSync(join(home, "state", "owner-wait.json"), JSON.stringify(w));
 };
 const alerts = () => m.calls.filter((c) => c[0] === "/bin/bash");
@@ -104,6 +107,43 @@ describe("owner waiting on yena", () => {
     m.clock += STUCK_MS * 2;
     await check(m.sys, p);
     expect(leadRuns()).toHaveLength(1);
+  });
+
+  test("once the limit clears, the missed owner messages go back to the lead once, with the prefix", async () => {
+    const replays = () =>
+      m.calls.filter((c) => c.includes("send") && (c.at(-1) ?? "").startsWith("[missed during limit]"));
+    m.screens.set("t1", "Error: You've hit your org's monthly spend limit (rate_limit)");
+    ownerWaiting(OWNER_WAIT_MS);
+    await check(m.sys, p);
+    expect(replays()).toEqual([]);
+    m.screens.set("t1", "> idle");
+    m.sendReply = { code: 3, out: "HELD lead: delivery may or may not have reached the pane" };
+    m.clock += MIN;
+    await check(m.sys, p);
+    expect(replays()).toHaveLength(1);
+    m.sendReply = { code: 0, out: "DELIVERED lead" };
+    m.clock += MIN;
+    await check(m.sys, p);
+    expect(replays()).toHaveLength(2);
+    const text = replays()[1]!.at(-1)!;
+    expect(text).toStartWith("[missed during limit]");
+    expect(text).toContain("너 왜 사라짐");
+    m.clock += MIN;
+    await check(m.sys, p);
+    expect(replays()).toHaveLength(2);
+    expect(m.logs.join("\n")).toContain("REPLAY 1 owner message(s)");
+  });
+
+  test("a wait that never hit a limit is not replayed", async () => {
+    ownerWaiting(OWNER_WAIT_MS);
+    for (let i = 0; i < 3; i++) {
+      m.screens.set("t1", `working ${i}`);
+      await check(m.sys, p);
+      m.clock += MIN;
+    }
+    expect(m.calls.filter((c) => c.includes("send") && (c.at(-1) ?? "").startsWith("[missed during limit]"))).toEqual(
+      [],
+    );
   });
 
   test("a lead whose screen keeps changing is left alone", async () => {

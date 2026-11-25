@@ -11,13 +11,26 @@ const wait = (dir: string) => JSON.parse(readFileSync(join(dir, "owner-wait.json
 test("the oldest unanswered owner message starts the wait; a reply ends it", () => {
   const state = withState();
   try {
-    ownerSpoke(state.dir, "Slack C1", 1000);
-    ownerSpoke(state.dir, "Telegram DM", 2000);
-    expect(wait(state.dir)).toEqual({ since: 1000, where: "Slack C1" });
-    yenaReplied(state.dir, 3000);
-    expect(wait(state.dir)).toEqual({ repliedAt: 3000 });
-    ownerSpoke(state.dir, "Telegram DM", 4000);
-    expect(wait(state.dir)["since"]).toBe(4000);
+    ownerSpoke(state.dir, "Slack C1", "왜 대답안함", 1000);
+    ownerSpoke(state.dir, "Telegram DM", "x".repeat(600), 2000);
+    expect(wait(state.dir)).toEqual({
+      since: 1000,
+      where: "Slack C1",
+      messages: [
+        { at: 1000, where: "Slack C1", text: "왜 대답안함" },
+        { at: 2000, where: "Telegram DM", text: "x".repeat(500) },
+      ],
+    });
+    for (let i = 0; i < 12; i++) ownerSpoke(state.dir, "Slack C1", `m${i}`, 3000 + i);
+    expect((wait(state.dir)["messages"] as unknown[]).length).toBe(10);
+    yenaReplied(state.dir, 5000);
+    expect(wait(state.dir)).toEqual({ repliedAt: 5000 });
+    ownerSpoke(state.dir, "Telegram DM", "again", 6000);
+    expect(wait(state.dir)).toEqual({
+      since: 6000,
+      where: "Telegram DM",
+      messages: [{ at: 6000, where: "Telegram DM", text: "again" }],
+    });
   } finally {
     state.done();
   }
@@ -63,7 +76,7 @@ test("send telegram ends the owner's wait, except the supervisor's alert (DORI_N
         ],
         { timeoutMs: 20_000 },
       );
-    ownerSpoke(state.dir, "Telegram DM", 1000);
+    ownerSpoke(state.dir, "Telegram DM", "hi?", 1000);
     expect((await send("DORI_NOT_A_REPLY=1")).code).toBe(0);
     expect(wait(state.dir)["since"]).toBe(1000);
     expect((await send()).code).toBe(0);
