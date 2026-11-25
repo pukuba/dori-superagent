@@ -147,7 +147,10 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
   for (const role of ROLES) {
     const mine = terms.filter((t) => t.labels["dori.role"] === role);
     const live = mine.filter((t) => alive(t, role, procs, p));
-    for (const t of live) seen.add(t.address);
+    for (const t of live) {
+      seen.add(t.address);
+      if (t.cwd) st.cwd = { ...st.cwd, [role]: t.cwd };
+    }
     if (live.length > 0) {
       const keep = live.find((t) => roles[role] === `hc:${t.address}`) ?? live[0]!;
       if (roles[role] !== `hc:${keep.address}`) {
@@ -201,7 +204,7 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
     streak[role] = (streak[role] ?? 0) + 1;
     try {
       const retireNote = role === "lead" ? writeHandoff(p, reason ? `${reason}; ${why}` : why, sys) : undefined;
-      const address = await launch(sys, p, group, role);
+      const address = await launch(sys, p, group, role, st.cwd?.[role]);
       seen.add(address);
       setRole(p, role, address);
       retireNote?.();

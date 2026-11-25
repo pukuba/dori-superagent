@@ -57,7 +57,7 @@ export class Machine {
     if (b === "server") return ok(this.holder === undefined ? {} : { holder: { pid: this.holder } });
     if (b === "ls") this.onLs();
     if (b === "ls") return ok({ terminals: [...this.terms.keys()].map((address) => ({ address, state: "live" })) });
-    if (b === "get") return ok({ ...this.terms.get(c!), address: c });
+    if (b === "get") return ok({ ...this.terms.get(c!), address: c, cwd: `/work/${c}` });
     if (b === "kill" || b === "rm") {
       this.terms.delete(c!);
       return ok({});

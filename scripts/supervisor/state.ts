@@ -11,6 +11,8 @@ export type State = {
   streak?: Partial<Record<Role, number>>;
   /** Addresses seen running their agent, or opened by the supervisor; only these are replaced when agentless. */
   seen?: string[];
+  /** Where each role last ran, so a relaunch opens in the same directory `dori up` was given. */
+  cwd?: Partial<Record<Role, string>>;
   nudgedAt?: number;
   lastSummary?: string;
   lastLogAt?: number;

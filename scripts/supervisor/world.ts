@@ -10,6 +10,7 @@ export type Term = {
   readonly address: string;
   readonly pid: number;
   readonly labels: Readonly<Record<string, string>>;
+  readonly cwd?: string;
 };
 export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string };
 export type Listener = { readonly kind: string; readonly match: RegExp; readonly command: string };
@@ -83,7 +84,7 @@ export async function groupTerms(sys: Sys, group: string): Promise<Term[] | unde
     const got = json(fetched.out);
     const labels = (got["labels"] ?? {}) as Record<string, string>;
     if (labels["dori.group"] === group && typeof got["pid"] === "number")
-      out.push({ address, pid: got["pid"], labels });
+      out.push({ address, pid: got["pid"], labels, ...(typeof got["cwd"] === "string" ? { cwd: got["cwd"] } : {}) });
   }
   return out;
 }
@@ -177,7 +178,8 @@ export function startCommand(p: Paths, role: Role): string {
 }
 
 /** Opens the role's terminal the way \`dori up\` does (labels, env, the user's shell), starts its program, returns the address. */
-export async function launch(sys: Sys, p: Paths, group: string, role: Role): Promise<string> {
+/** `cwd`: where the role last ran (as `dori up` was told), else this checkout. */
+export async function launch(sys: Sys, p: Paths, group: string, role: Role, cwd: string = p.repo): Promise<string> {
   const name = NAMES[role];
   const env = role === "lead" ? [] : [`DORI_HOME=${p.home}`];
   const argv = (named: boolean) => [
@@ -188,7 +190,7 @@ export async function launch(sys: Sys, p: Paths, group: string, role: Role): Pro
     "--no-parent",
     "--no-notify",
     "--cwd",
-    p.repo,
+    cwd,
     "--label",
     `dori.group=${group}`,
     "--label",
@@ -207,7 +209,11 @@ export async function launch(sys: Sys, p: Paths, group: string, role: Role): Pro
   if (r.code !== 0 || typeof address !== "string") throw new Error(`hc run for ${role} failed: ${r.err || r.out}`);
   // Same argv as the harness's own start(): `--` keeps a command starting with "-" from being read as a flag.
   const sent = await sys.run(["hc", "send", address, "--", startCommand(p, role)]);
-  if (sent.code !== 0) throw new Error(`hc send to ${address} failed: ${sent.err || sent.out}`);
+  if (sent.code !== 0) {
+    // A terminal left open with nothing started would look like someone else's and never be replaced: close it.
+    await close(sys, address);
+    throw new Error(`hc send to ${address} failed: ${sent.err || sent.out}`);
+  }
   return address;
 }
 

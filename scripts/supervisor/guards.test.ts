@@ -96,4 +96,22 @@ describe("supervisor guards", () => {
     const outs = m.calls.filter((c) => c[0] === "launchctl" && c[1] === "bootout").map((c) => c[2]!.split("/").at(-1));
     expect(outs).toEqual([`dev.dori.supervisor.${groupId(home)}`, `dev.dori.restart-host.${groupId(home)}`]);
   });
+
+  test("a terminal whose start command could not be sent is closed, so the next pass replaces it and the streak grows", async () => {
+    await check(m.sys, p); // the lead is seen alive in /work/t1
+    m.terms.delete("t1");
+    m.failing = new Set(["hc send"]);
+    await check(m.sys, p);
+    const opened = m.ran("run").at(-1)!;
+    expect(opened).toContain("/work/t1");
+    const address = m.calls.find((c) => c[1] === "send")![2]!;
+    expect(m.calls).toContainEqual(["hc", "kill", address]);
+    expect(m.terms.has(address)).toBe(false);
+    m.failing = new Set();
+    m.clock += GRACE_MS + 1;
+    await check(m.sys, p);
+    const st = JSON.parse(readFileSync(join(home, "supervisor", "state.json"), "utf8"));
+    expect(st.streak.lead).toBe(2);
+    expect(m.ran("run").filter((c) => c.includes("dori.role=lead"))).toHaveLength(2);
+  });
 });
