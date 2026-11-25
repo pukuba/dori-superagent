@@ -26,6 +26,20 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 describe("restart-host job", () => {
+  test("a holder that never comes back alerts the owner; a lock never freed fails the job", async () => {
+    writeFileSync(join(home, "telegram.env"), "");
+    mkdirSync(join(home, "supervisor", "lock"), { recursive: true });
+    writeFileSync(join(home, "supervisor", "lock", "owner"), "stuck-pass");
+    m.clock = Date.now();
+    m.onSleep = () => {
+      m.holder = undefined; // the app never respawns
+    };
+    expect(await restartRun(m.sys, p, { core: false, delayS: 0 })).toBe(1);
+    expect(m.calls.filter((c) => c[0] === "/bin/bash")).toHaveLength(1);
+    expect(m.logs.join("\n")).toContain("RESTART ERR no terminal holder came back");
+    expect(m.ran("run")).toEqual([]);
+  });
+
   test("waits for a scheduled pass to release the lock instead of giving up", async () => {
     mkdirSync(join(home, "supervisor", "lock"), { recursive: true });
     writeFileSync(join(home, "supervisor", "lock", "owner"), "scheduled-pass");

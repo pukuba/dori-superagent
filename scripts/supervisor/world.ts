@@ -100,20 +100,31 @@ export function alive(t: Term, role: Role, procs: readonly Proc[], agentCmd: str
   return procs.some((p) => p.pid !== t.pid && tree.has(p.pid) && want.test(p.cmd));
 }
 
+/** The documented watch commands (references/setup.md); a home overrides one with supervisor.json `listeners.<kind>`. */
+export const DEFAULT_LISTENER_ARGS: Readonly<Record<string, string>> = {
+  telegram: "inbound telegram --loop 1",
+  slack: "inbound slack --loop 1",
+};
+
 /** The inbound listeners this home has credentials for, each as the monitor command the lead arms. */
 export function listeners(p: Paths): Listener[] {
   const dir = join(p.repo, "skills", "dori-mode", "scripts");
-  const spec = [
-    { kind: "telegram", args: "inbound telegram --loop 1" },
-    { kind: "slack", args: "inbound slack --socket" },
-  ];
-  return spec
-    .filter((s) => existsSync(join(p.home, `${s.kind}.env`)))
-    .map((s) => ({
-      kind: s.kind,
-      // Anchored on the listener program itself: an agent whose prompt quotes this command must not count as one.
-      match: new RegExp(`^\\S*bun src/cli\\.ts ${s.args.split(" ").slice(0, 2).join(" ")}\\b`),
-      command: `. ${shq(join(p.home, `${s.kind}.env`))}; cd ${shq(dir)} && bun src/cli.ts ${s.args}`,
+  let custom: Record<string, string> = {};
+  try {
+    custom =
+      (JSON.parse(readFileSync(join(p.home, "supervisor.json"), "utf8")) as { listeners?: Record<string, string> })
+        .listeners ?? {};
+  } catch {
+    // no supervisor.json: the documented commands
+  }
+  return Object.entries({ ...DEFAULT_LISTENER_ARGS, ...custom })
+    .filter(([kind]) => existsSync(join(p.home, `${kind}.env`)))
+    .map(([kind, args]) => ({
+      kind,
+      // Anchored on the listener program (the skill's cli.ts, directly or through the `dori` bin) at the start of the
+      // command line: an agent whose prompt quotes the command must not count as one.
+      match: new RegExp(`^(\\S*/)?(bun\\s+)?\\S*(cli\\.ts|dori)\\s+inbound\\s+${kind}\\b`),
+      command: `. ${shq(join(p.home, `${kind}.env`))}; cd ${shq(dir)} && bun src/cli.ts ${args}`,
     }));
 }
 

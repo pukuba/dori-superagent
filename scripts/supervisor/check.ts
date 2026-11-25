@@ -26,7 +26,7 @@ export const AGENTLESS_MS = 2 * 60_000;
 export const MAX_STREAK = 3;
 export const BACKOFF_MS = 30 * 60_000;
 /** A restart-host run is in progress while its marker is younger than this; checks leave the sessions alone meanwhile. */
-export const RESTART_WINDOW_MS = 6 * 60_000;
+export const RESTART_WINDOW_MS = 10 * 60_000;
 const LOCK_STALE_MS = 10 * 60_000;
 /** How long (2s steps) the restart job waits for a scheduled pass to release the lock. */
 const LOCK_WAIT_TRIES = 90;
@@ -67,7 +67,7 @@ function writeHandoff(p: Paths, why: string, sys: Sys): void {
 }
 
 /** Tells the owner once, over Telegram when this home has it, that a role keeps failing to start. Never throws. */
-async function alertOwner(sys: Sys, p: Paths, text: string): Promise<string> {
+export async function alertOwner(sys: Sys, p: Paths, text: string): Promise<string> {
   const env = join(p.home, "telegram.env");
   if (!existsSync(env)) return "no telegram.env to alert through";
   const file = join(supervisorDir(p), "alert.txt");
@@ -97,7 +97,8 @@ export async function check(
     await sys.sleep(2000);
     held = takeLock(lock, token, sys);
   }
-  if (!held) return said(sys, "BUSY another check holds the lock", 0);
+  // The restart job must not report success when it never got to relaunch the lead with its reason.
+  if (!held) return said(sys, "BUSY another check holds the lock", opts.duringRestart ? 1 : 0);
   try {
     return await pass(sys, p, opts.reason);
   } finally {
@@ -122,7 +123,13 @@ function takeLock(lock: string, token: string, sys: Sys): boolean {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       mkdirSync(lock);
-      writeFileSync(join(lock, "owner"), token);
+      try {
+        writeFileSync(join(lock, "owner"), token);
+      } catch {
+        // an ownerless lock would block every pass until it went stale: undo it
+        rmSync(lock, { recursive: true, force: true });
+        return false;
+      }
       return true;
     } catch {
       let age: number;

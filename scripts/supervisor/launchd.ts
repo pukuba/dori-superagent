@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
-import { check } from "./check.ts";
+import { alertOwner, check } from "./check.ts";
 import { restartMarker, restartNote } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
 
@@ -111,6 +111,18 @@ const holderPid = async (sys: Sys): Promise<number | undefined> => {
     return undefined;
   }
 };
+/** The app bundle behind the installed `hc` (a symlink into it), else the default install path. */
+function holderApp(): string {
+  try {
+    const bin = realpathSync(join(homedir(), ".local", "bin", "hc"));
+    const app = bin.slice(0, bin.lastIndexOf(".app/") + 4);
+    if (app.endsWith(".app")) return app;
+  } catch {
+    // fall through to the default
+  }
+  return join(homedir(), ".local", "share", "herdr-core", "active", "Herdr Core.app");
+}
+
 const running = async (sys: Sys, pid: number): Promise<boolean> =>
   (await sys.run(["kill", "-0", String(pid)])).code === 0;
 
@@ -133,14 +145,22 @@ export async function restartRun(sys: Sys, p: Paths, o: { core: boolean; delayS:
       }
       let now = await holderPid(sys);
       for (let i = 0; i < HOLDER_WAIT_S / 2 && now === undefined; i++) {
-        if (i === 20)
-          await sys.run(["open", join(homedir(), ".local", "share", "herdr-core", "active", "Herdr Core.app")]);
+        if (i === 20) await sys.run(["open", holderApp()]);
         await sys.sleep(2000);
         now = await holderPid(sys);
       }
-      sys.log(now === undefined ? "RESTART ERR no terminal holder came back" : `RESTART holder back as pid ${now}`);
+      if (now === undefined) {
+        const said = await alertOwner(
+          sys,
+          p,
+          "dori supervisor: Herdr Core was restarted on purpose, but its terminal holder did not come back. The lead cannot be relaunched until it does. Log: ~/Library/Logs/dori-restart-host.log",
+        );
+        sys.log(`RESTART ERR no terminal holder came back; ${said}`);
+      } else sys.log(`RESTART holder back as pid ${now}`);
     }
-    // Still under the marker, so a scheduled check cannot slip in and relaunch the lead without the restart's reason.
+    // Still under the marker, refreshed so the wait above never runs it out: a scheduled check cannot slip in and
+    // relaunch the lead without the restart's reason.
+    writeFileSync(restartMarker(p), String(sys.now()));
     const code = await check(sys, p, {
       reason: "the host was restarted on purpose with restart-host",
       duringRestart: true,

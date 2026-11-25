@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
 import { AGENTLESS_MS, BACKOFF_MS, check, GRACE_MS, MAX_STREAK } from "./check.ts";
 import { NUDGE_EVERY_MS } from "./listeners.ts";
+import { listeners } from "./world.ts";
 import { AGENT, healthy, Machine } from "./machine.ts";
 import type { Paths } from "./sys.ts";
 
@@ -216,6 +217,22 @@ describe("supervisor check", () => {
     m.onLs = () => writeFileSync(owner, "other-pass");
     await check(m.sys, p);
     expect(readFileSync(owner, "utf8")).toBe("other-pass");
+  });
+
+  test("listeners use the documented commands unless supervisor.json overrides one; the dori bin form counts", async () => {
+    writeFileSync(join(home, "telegram.env"), "");
+    writeFileSync(join(home, "slack.env"), "");
+    const kinds = () => Object.fromEntries(listeners(p).map((l) => [l.kind, l]));
+    expect(kinds()["telegram"]!.command).toEndWith("bun src/cli.ts inbound telegram --loop 1");
+    expect(kinds()["slack"]!.command).toEndWith("bun src/cli.ts inbound slack --loop 1");
+    writeFileSync(join(home, "supervisor.json"), JSON.stringify({ listeners: { slack: "inbound slack --socket" } }));
+    expect(kinds()["slack"]!.command).toEndWith("bun src/cli.ts inbound slack --socket");
+    const slack = kinds()["slack"]!.match;
+    expect(slack.test("/Users/x/.bun/bin/bun /r/skills/dori-mode/scripts/src/cli.ts inbound slack --loop 1")).toBe(
+      true,
+    );
+    expect(slack.test("dori inbound slack --loop 1")).toBe(true);
+    expect(slack.test(`${AGENT} "arm: dori inbound slack --loop 1"`)).toBe(false);
   });
 
   test("a pause file stops every repair", async () => {
