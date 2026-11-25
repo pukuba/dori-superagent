@@ -1,11 +1,15 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { check, restartMarker, restartNote } from "./check.ts";
+import { groupId } from "../../src/runtime/group.ts";
+import { check } from "./check.ts";
+import { restartMarker, restartNote } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
 
-export const SUPERVISOR_LABEL = "dev.dori.supervisor";
-export const RESTART_LABEL = "dev.dori.restart-host";
+/** One job per dori home (its group id), so a second home on the same Mac never replaces the first. */
+export const supervisorLabel = (p: Paths): string => `dev.dori.supervisor.${groupId(p.home)}`;
+export const restartLabel = (p: Paths): string => `dev.dori.restart-host.${groupId(p.home)}`;
+const agentPlist = (p: Paths): string => join(homedir(), "Library", "LaunchAgents", `${supervisorLabel(p)}.plist`);
 const MAIN = join(import.meta.dir, "main.ts");
 const HOLDER_WAIT_S = 120;
 
@@ -51,21 +55,21 @@ async function load(sys: Sys, label: string, file: string): Promise<void> {
 
 /** Installs and loads the LaunchAgent that runs \`check\` at login and every 60 seconds, surviving reboots and host restarts. */
 export async function install(sys: Sys, p: Paths): Promise<number> {
-  const file = join(homedir(), "Library", "LaunchAgents", `${SUPERVISOR_LABEL}.plist`);
+  const file = agentPlist(p);
   mkdirSync(dirname(file), { recursive: true });
   const extra =
     "<key>RunAtLoad</key><true/>\n<key>StartInterval</key><integer>60</integer>\n<key>ProcessType</key><string>Background</string>";
-  writeFileSync(file, plist(p, SUPERVISOR_LABEL, ["check"], extra, logFile("dori-supervisor.log")));
-  await load(sys, SUPERVISOR_LABEL, file);
+  writeFileSync(file, plist(p, supervisorLabel(p), ["check"], extra, logFile("dori-supervisor.log")));
+  await load(sys, supervisorLabel(p), file);
   sys.log(`INSTALLED ${file} (log ~/Library/Logs/dori-supervisor.log)`);
   return 0;
 }
 
-export async function uninstall(sys: Sys): Promise<number> {
-  const file = join(homedir(), "Library", "LaunchAgents", `${SUPERVISOR_LABEL}.plist`);
-  await sys.run(["launchctl", "bootout", `${await domain(sys)}/${SUPERVISOR_LABEL}`]);
+export async function uninstall(sys: Sys, p: Paths): Promise<number> {
+  const file = agentPlist(p);
+  await sys.run(["launchctl", "bootout", `${await domain(sys)}/${supervisorLabel(p)}`]);
   if (existsSync(file)) rmSync(file);
-  sys.log(`UNINSTALLED ${SUPERVISOR_LABEL}`);
+  sys.log(`UNINSTALLED ${supervisorLabel(p)}`);
   return 0;
 }
 
@@ -80,12 +84,12 @@ export async function scheduleRestart(
 ): Promise<number> {
   mkdirSync(join(p.home, "supervisor"), { recursive: true });
   if (o.note) writeFileSync(restartNote(p), `${o.note}\n`);
-  const file = join(p.home, "supervisor", `${RESTART_LABEL}.plist`);
+  const file = join(p.home, "supervisor", `${restartLabel(p)}.plist`);
   const args = ["restart-run", "--delay", String(o.delayS), ...(o.core ? ["--core"] : [])];
-  writeFileSync(file, plist(p, RESTART_LABEL, args, "<key>RunAtLoad</key><true/>", logFile("dori-restart-host.log")));
-  await load(sys, RESTART_LABEL, file);
+  writeFileSync(file, plist(p, restartLabel(p), args, "<key>RunAtLoad</key><true/>", logFile("dori-restart-host.log")));
+  await load(sys, restartLabel(p), file);
   sys.log(
-    `SCHEDULED host restart (${o.core ? "hc core" : "Herdr Core app"}) in ${o.delayS}s from launchd job ${RESTART_LABEL}; the supervisor relaunches the lead after it`,
+    `SCHEDULED host restart (${o.core ? "hc core" : "Herdr Core app"}) in ${o.delayS}s from launchd job ${restartLabel(p)}; the supervisor relaunches the lead after it`,
   );
   return 0;
 }
@@ -128,13 +132,14 @@ export async function restartRun(sys: Sys, p: Paths, o: { core: boolean; delayS:
       }
       sys.log(now === undefined ? "RESTART ERR no terminal holder came back" : `RESTART holder back as pid ${now}`);
     }
+    // Still under the marker, so a scheduled check cannot slip in and relaunch the lead without the restart's reason.
+    const code = await check(sys, p, {
+      reason: "the host was restarted on purpose with restart-host",
+      duringRestart: true,
+    });
+    sys.log(`RESTART done check exit=${code}`);
+    return code;
   } finally {
     rmSync(restartMarker(p), { force: true });
   }
-  const code = await check(sys, p, {
-    reason: "the host was restarted on purpose with restart-host",
-    duringRestart: true,
-  });
-  sys.log(`RESTART done check exit=${code}`);
-  return code;
 }

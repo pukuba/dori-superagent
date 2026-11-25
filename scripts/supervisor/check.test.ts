@@ -1,80 +1,30 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
-import { AGENTLESS_MS, check, GRACE_MS, NUDGE_EVERY_MS } from "./check.ts";
-import type { Paths, RunResult, Sys } from "./sys.ts";
-
-type T = { pid: number; labels: Record<string, string> };
-type P = { pid: number; ppid: number; cmd: string };
-
-/** A scripted machine: hc terminals, a process table, and every command the supervisor ran. */
-class Machine {
-  terms = new Map<string, T>();
-  procs: P[] = [];
-  calls: string[][] = [];
-  logs: string[] = [];
-  clock = 1_000_000;
-  next = 100;
-  sys: Sys = {
-    run: async (argv) => this.run(argv),
-    now: () => this.clock,
-    sleep: async () => {},
-    log: (l) => void this.logs.push(l),
-  };
-  constructor(readonly group: string) {}
-  term(address: string, role: string, pid: number, agentCmd?: string): void {
-    this.terms.set(address, { pid, labels: { "dori.group": this.group, "dori.role": role } });
-    this.procs.push({ pid, ppid: 1, cmd: "/bin/zsh" });
-    if (agentCmd) this.procs.push({ pid: pid + 1, ppid: pid, cmd: agentCmd });
-  }
-  ran = (word: string): string[][] => this.calls.filter((c) => c.includes(word));
-  private run(argv: readonly string[]): RunResult {
-    this.calls.push([...argv]);
-    const ok = (out: unknown): RunResult => ({
-      code: 0,
-      out: typeof out === "string" ? out : JSON.stringify(out),
-      err: "",
-    });
-    const [a, b, c] = argv;
-    if (a === "ps") return ok(this.procs.map((p) => `${p.pid} ${p.ppid} ${p.cmd}`).join("\n"));
-    if (a === "kill") return ok("");
-    if (a !== "hc") return ok("DELIVERED lead");
-    if (b === "server") return ok({});
-    if (b === "ls") return ok({ terminals: [...this.terms.keys()].map((address) => ({ address, state: "live" })) });
-    if (b === "get") return ok({ ...this.terms.get(c!), address: c });
-    if (b === "kill" || b === "rm") {
-      this.terms.delete(c!);
-      return ok({});
-    }
-    if (b === "run") {
-      const labels: Record<string, string> = {};
-      argv.forEach((v, i) => {
-        if (argv[i - 1] === "--label") labels[v.split("=")[0]!] = v.split("=")[1]!;
-      });
-      const address = `t${(this.next++).toString(36)}`;
-      this.terms.set(address, { pid: this.next * 10, labels });
-      return ok({ address });
-    }
-    return ok({});
-  }
-}
+import { AGENTLESS_MS, BACKOFF_MS, check, GRACE_MS, MAX_STREAK } from "./check.ts";
+import { NUDGE_EVERY_MS } from "./listeners.ts";
+import { AGENT, healthy, Machine } from "./machine.ts";
+import type { Paths } from "./sys.ts";
 
 let home: string;
 let p: Paths;
 let m: Machine;
-const AGENT = "/bun /x/senpi/dist/bundle/cli.js --append-system-prompt lead.md";
 const roles = () => JSON.parse(readFileSync(join(home, "roles.json"), "utf8")) as Record<string, string>;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "dori-sup-"));
-  p = { home, repo: resolve(import.meta.dir, "..", ".."), bun: "/bin/bun", agentCmd: "omo", shell: "/bin/zsh" };
+  p = {
+    home,
+    repo: resolve(import.meta.dir, "..", ".."),
+    bun: "/bin/bun",
+    agentCmd: "omo",
+    shell: "/bin/zsh",
+    doriCmd: "DORI_HOME=h bun cli.ts",
+  };
   m = new Machine(groupId(home));
-  m.term("t1", "lead", 10, AGENT);
-  m.term("t2", "duty", 20, AGENT);
-  m.term("t3", "duty-loop", 30, "bun /r/src/cli.ts duty --interval 60");
-  m.term("t4", "hourly-loop", 40, "bun /r/src/cli.ts loop");
+  healthy(m);
   writeFileSync(
     join(home, "roles.json"),
     JSON.stringify({ lead: "hc:t1", duty: "hc:t2", "duty-loop": "hc:t3", "hourly-loop": "hc:t4" }),
@@ -123,14 +73,20 @@ describe("supervisor check", () => {
 
   test("missing listeners make one nudge to the lead per cooldown; orphans outside the group are stopped", async () => {
     writeFileSync(join(home, "telegram.env"), "");
-    m.procs.push({ pid: 500, ppid: 1, cmd: "bun src/cli.ts inbound telegram --loop 1" });
+    const listener = "bun src/cli.ts inbound telegram --loop 1";
+    m.procs.push({ pid: 499, ppid: 1, cmd: `/bin/bash -c . '${home}/telegram.env'; cd x && ${listener}` });
+    m.procs.push({ pid: 500, ppid: 499, cmd: listener });
     m.procs.push({
-      pid: 499,
+      pid: 601,
       ppid: 1,
-      cmd: "/bin/bash -c . telegram.env; cd x && bun src/cli.ts inbound telegram --loop 1",
+      cmd: "/bin/bash -c . '/other/home/telegram.env'; cd x && bun src/cli.ts inbound telegram --loop 1",
     });
+    m.procs.push({ pid: 602, ppid: 601, cmd: listener });
+    m.procs.push({ pid: 700, ppid: 1, cmd: "-zsh" });
+    m.procs.push({ pid: 701, ppid: 700, cmd: listener });
     await check(m.sys, p);
-    expect(m.calls).toContainEqual(["kill", "500"]);
+    const killed = m.calls.filter((c) => c[0] === "kill").map((c) => c[1]);
+    expect(killed.sort()).toEqual(["499", "500"]);
     const nudges = () => m.calls.filter((c) => c.includes("send") && c.includes("lead"));
     expect(nudges()).toHaveLength(1);
     expect(nudges()[0]!.join(" ")).toContain("inbound telegram --loop 1");
@@ -138,7 +94,7 @@ describe("supervisor check", () => {
     await check(m.sys, p);
     expect(nudges()).toHaveLength(1);
     m.procs.push({ pid: 12, ppid: 11, cmd: "bun src/cli.ts inbound telegram --loop 1" });
-    m.procs = m.procs.filter((pr) => pr.pid !== 500);
+    m.procs = m.procs.filter((pr) => pr.pid !== 500 && pr.pid !== 499);
     m.clock += GRACE_MS;
     await check(m.sys, p);
     expect(nudges()).toHaveLength(1);
@@ -161,6 +117,51 @@ describe("supervisor check", () => {
     m.clock += GRACE_MS + 1;
     await check(m.sys, p);
     expect(m.calls.filter((c) => c.includes("send") && c.includes("lead"))).toHaveLength(1);
+  });
+
+  test("a relaunched lead gets its prompt rendered into the home, with {{dori}} filled", async () => {
+    m.terms.delete("t1");
+    await check(m.sys, p);
+    const cmd = m.ran("send")[0]!.at(-1)!;
+    expect(cmd).toContain(join(home, "prompts", "lead.md"));
+    const rendered = readFileSync(join(home, "prompts", "lead.md"), "utf8");
+    expect(rendered).toContain("DORI_HOME=h bun cli.ts start");
+    expect(rendered).not.toContain("{{dori}}");
+  });
+
+  test("a stale lock is taken over; a fresh one makes the pass stand down", async () => {
+    mkdirSync(join(home, "supervisor", "lock"), { recursive: true });
+    m.clock = Date.now();
+    await check(m.sys, p);
+    expect(m.logs.at(-1)).toStartWith("BUSY");
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(join(home, "supervisor", "lock"), old, old);
+    await check(m.sys, p);
+    expect(m.logs.at(-1)).toStartWith("OK");
+    expect(existsSync(join(home, "supervisor", "lock"))).toBe(false);
+  });
+
+  test("a lead whose agent never starts backs off after MAX_STREAK relaunches and alerts the owner once", async () => {
+    writeFileSync(join(home, "telegram.env"), "");
+    m.terms.delete("t1");
+    for (let i = 0; i < MAX_STREAK; i++) {
+      await check(m.sys, p);
+      m.clock += GRACE_MS + 1;
+      await check(m.sys, p);
+      m.clock += AGENTLESS_MS + 1;
+    }
+    const leadRuns = () => m.ran("run").filter((c) => c.includes("dori.role=lead"));
+    expect(leadRuns()).toHaveLength(MAX_STREAK);
+    expect(m.calls.filter((c) => c[0] === "/bin/bash")).toHaveLength(1);
+    await check(m.sys, p);
+    m.clock += AGENTLESS_MS + 1;
+    await check(m.sys, p);
+    expect(leadRuns()).toHaveLength(MAX_STREAK);
+    m.clock += BACKOFF_MS; // after the backoff, the stuck terminal still gets its agentless wait before it is replaced
+    await check(m.sys, p);
+    m.clock += AGENTLESS_MS + 1;
+    await check(m.sys, p);
+    expect(leadRuns().length).toBeGreaterThan(MAX_STREAK);
   });
 
   test("a pause file stops every repair", async () => {

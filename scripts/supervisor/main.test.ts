@@ -14,7 +14,14 @@ test("the launchd commands refuse off macOS and touch nothing", async () => {
     sleep: async () => {},
     log: (l) => void logs.push(l),
   };
-  const p: Paths = { home: "/nonexistent", repo: "/r", bun: "/bin/bun", agentCmd: "omo", shell: "/bin/sh" };
+  const p: Paths = {
+    home: "/nonexistent",
+    repo: "/r",
+    bun: "/bin/bun",
+    agentCmd: "omo",
+    shell: "/bin/sh",
+    doriCmd: "dori",
+  };
   for (const cmd of ["install", "uninstall", "restart-host", "restart-run"])
     expect(await main([cmd], sys, p, "linux")).toBe(2);
   expect(calls).toEqual([]);

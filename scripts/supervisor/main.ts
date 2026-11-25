@@ -13,17 +13,24 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { check, pauseFile } from "./check.ts";
+import { shq } from "../../src/delivery.ts";
+import { check } from "./check.ts";
+import { pauseFile } from "./state.ts";
 import { install, restartRun, scheduleRestart, uninstall } from "./launchd.ts";
 import { type Paths, realSys, type Sys } from "./sys.ts";
 
-export const paths = (env: Readonly<Record<string, string | undefined>> = process.env): Paths => ({
-  home: resolve(env["DORI_HOME"] || join(homedir(), ".dori")),
-  repo: resolve(import.meta.dir, "..", ".."),
-  bun: process.execPath,
-  agentCmd: env["DORI_AGENT_CMD"] || "omo",
-  shell: env["SHELL"] || "/bin/zsh",
-});
+export const paths = (env: Readonly<Record<string, string | undefined>> = process.env): Paths => {
+  const home = resolve(env["DORI_HOME"] || join(homedir(), ".dori"));
+  const repo = resolve(import.meta.dir, "..", "..");
+  return {
+    home,
+    repo,
+    bun: process.execPath,
+    agentCmd: env["DORI_AGENT_CMD"] || "omo",
+    shell: env["SHELL"] || "/bin/zsh",
+    doriCmd: env["DORI_CMD"] ?? `DORI_HOME=${shq(home)} bun ${shq(join(repo, "src", "cli.ts"))}`,
+  };
+};
 
 const flag = (argv: readonly string[], name: string): string | undefined => {
   const i = argv.indexOf(`--${name}`);
@@ -53,7 +60,7 @@ export async function main(
     case "install":
       return install(sys, p);
     case "uninstall":
-      return uninstall(sys);
+      return uninstall(sys, p);
     case "pause":
       mkdirSync(dirname(pauseFile(p)), { recursive: true });
       writeFileSync(pauseFile(p), `${flag(argv, "text") ?? "paused"}\n`);

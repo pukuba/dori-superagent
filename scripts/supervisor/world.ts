@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { shq } from "../../src/delivery.ts";
 import type { Paths, Sys } from "./sys.ts";
 
@@ -102,14 +102,19 @@ export function listeners(p: Paths): Listener[] {
     }));
 }
 
-const promptFile = (p: Paths, name: string): string =>
-  existsSync(join(p.home, "prompts", name)) ? join(p.home, "prompts", name) : join(p.repo, "prompts", name);
+/** Renders the repo's prompt into the home on every launch, exactly as \`dori up\` does, so a relaunch carries today's rules. */
+function promptFile(p: Paths, name: string): string {
+  const out = join(p.home, "prompts", name);
+  mkdirSync(dirname(out), { recursive: true });
+  writeFileSync(out, readFileSync(join(p.repo, "prompts", name), "utf8").replaceAll("{{dori}}", p.doriCmd));
+  return out;
+}
 
 export const handoffFile = (p: Paths): string => join(p.home, "supervisor", "handoff-lead.md");
 
 /** The command typed into a role's fresh shell: the same programs \`dori up\` starts, the lead with its handoff as first prompt. */
 export function startCommand(p: Paths, role: Role): string {
-  const dori = `DORI_HOME=${shq(p.home)} ${shq(p.bun)} ${shq(join(p.repo, "src", "cli.ts"))}`;
+  const dori = p.doriCmd;
   switch (role) {
     case "lead":
       return `${p.agentCmd} --append-system-prompt ${shq(promptFile(p, "lead.md"))} "$(cat ${shq(handoffFile(p))})"`;

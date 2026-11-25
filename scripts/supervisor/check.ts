@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
+import { tendListeners } from "./listeners.ts";
+import { pauseFile, readJson, restartMarker, restartNote, type State, supervisorDir } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
 import {
   alive,
@@ -14,54 +16,30 @@ import {
   ROLES,
   type Role,
   type Term,
-  treeOf,
 } from "./world.ts";
 
 /** A relaunched session gets this long to start its agent before it counts as dead. */
 export const GRACE_MS = 3 * 60_000;
 /** A live terminal with no agent in it is replaced only after it stayed that way this long (a person may be restarting it). */
 export const AGENTLESS_MS = 2 * 60_000;
-/** The lead is asked to re-arm missing listeners at most this often. */
-export const NUDGE_EVERY_MS = 10 * 60_000;
+/** After this many relaunches in a row whose agent never came up, the role backs off and the owner is alerted once. */
+export const MAX_STREAK = 3;
+export const BACKOFF_MS = 30 * 60_000;
 /** A restart-host run is in progress while its marker is younger than this; checks leave the sessions alone meanwhile. */
 export const RESTART_WINDOW_MS = 6 * 60_000;
 const LOCK_STALE_MS = 10 * 60_000;
-const OK_LOG_EVERY_MS = 60 * 60_000;
-
-type State = {
-  launched: Partial<Record<Role, number>>;
-  agentless: Partial<Record<Role, number>>;
-  nudgedAt?: number;
-  lastSummary?: string;
-  lastLogAt?: number;
-};
-
-const dir = (p: Paths): string => join(p.home, "supervisor");
-export const restartMarker = (p: Paths): string => join(dir(p), "restarting");
-export const pauseFile = (p: Paths): string => join(dir(p), "paused");
-/** What restart-host was asked to pass on; used once, and only while it is this fresh. */
-export const restartNote = (p: Paths): string => join(dir(p), "restart-note.md");
 const NOTE_FRESH_MS = 30 * 60_000;
+const OK_LOG_EVERY_MS = 60 * 60_000;
 
 const said = (sys: Sys, line: string, code: number): number => {
   sys.log(line);
   return code;
 };
 
-const readJson = <T>(file: string, fallback: T): T => {
-  try {
-    return JSON.parse(readFileSync(file, "utf8")) as T;
-  } catch {
-    return fallback;
-  }
-};
-
 function setRole(p: Paths, role: Role, address: string): void {
   const file = join(p.home, "roles.json");
-  writeFileSync(
-    file,
-    `${JSON.stringify({ ...readJson<Record<string, string>>(file, {}), [role]: `hc:${address}` }, null, 2)}\n`,
-  );
+  const roles = { ...readJson<Record<string, string>>(file, {}), [role]: `hc:${address}` };
+  writeFileSync(file, `${JSON.stringify(roles, null, 2)}\n`);
 }
 
 function writeHandoff(p: Paths, why: string, sys: Sys): void {
@@ -85,28 +63,50 @@ function writeHandoff(p: Paths, why: string, sys: Sys): void {
   writeFileSync(handoffFile(p), text);
 }
 
+/** Tells the owner once, over Telegram when this home has it, that a role keeps failing to start. Never throws. */
+async function alertOwner(sys: Sys, p: Paths, text: string): Promise<string> {
+  const env = join(p.home, "telegram.env");
+  if (!existsSync(env)) return "no telegram.env to alert through";
+  const file = join(supervisorDir(p), "alert.txt");
+  writeFileSync(file, text);
+  const dir = join(p.repo, "skills", "dori-mode", "scripts");
+  const script = `. "$1"; cd "$2" && bun src/cli.ts send telegram --to "$DORI_TELEGRAM_OWNER_ID" --text "$(cat "$3")"`;
+  const r = await sys.run(["/bin/bash", "-c", script, "alert", env, dir, file]);
+  return r.code === 0 ? "alerted the owner on Telegram" : `alert failed (exit ${r.code})`;
+}
+
 /** One supervision pass under a lock: hc up, each role alive and registered, the lead's listeners armed. 0 = fine or repaired. */
 export async function check(
   sys: Sys,
   p: Paths,
   opts: { reason?: string; duringRestart?: boolean } = {},
 ): Promise<number> {
-  mkdirSync(dir(p), { recursive: true });
+  mkdirSync(supervisorDir(p), { recursive: true });
   if (existsSync(pauseFile(p))) return said(sys, "PAUSED (remove supervisor/paused or run resume)", 0);
   const marker = restartMarker(p);
   if (!opts.duringRestart && existsSync(marker) && sys.now() - statSync(marker).mtimeMs < RESTART_WINDOW_MS)
     return said(sys, "RESTARTING host restart in progress, leaving sessions alone", 0);
-  const lock = join(dir(p), "lock");
-  try {
-    mkdirSync(lock);
-  } catch {
-    if (sys.now() - statSync(lock).mtimeMs < LOCK_STALE_MS) return said(sys, "BUSY another check holds the lock", 0);
-  }
+  const lock = join(supervisorDir(p), "lock");
+  if (!takeLock(lock, sys)) return said(sys, "BUSY another check holds the lock", 0);
   try {
     return await pass(sys, p, opts.reason);
   } finally {
     rmdirSync(lock);
   }
+}
+
+/** mkdir is the lock; a stale one is removed and taken over, and only the pass whose mkdir succeeds proceeds. */
+function takeLock(lock: string, sys: Sys): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(lock);
+      return true;
+    } catch {
+      if (attempt > 0 || sys.now() - statSync(lock).mtimeMs < LOCK_STALE_MS) return false;
+      rmdirSync(lock);
+    }
+  }
+  return false;
 }
 
 async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<number> {
@@ -119,8 +119,10 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
     for (let i = 0; i < 30 && !(await hcUp(sys)); i++) await sys.sleep(2000);
     if (!(await hcUp(sys))) return said(sys, "ERR hc core did not come up", 1);
   }
-  const stateFile = join(dir(p), "state.json");
+  const stateFile = join(supervisorDir(p), "state.json");
   const st = readJson<State>(stateFile, { launched: {}, agentless: {} });
+  st.streak ??= {};
+  const streak = st.streak;
   const group = groupId(p.home);
   const terms = await groupTerms(sys, group);
   const procs = await processes(sys);
@@ -141,11 +143,15 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
         actions.push(`WARN ${live.length} live ${role} sessions: ${live.map((t) => t.address).join(" ")}`);
       if (role === "lead") lead = keep;
       delete st.agentless[role];
+      delete streak[role];
       continue;
     }
     const launchedAt = st.launched[role];
-    if (launchedAt !== undefined && now - launchedAt < GRACE_MS && mine.length > 0) {
-      actions.push(`WAIT ${role} starting in ${mine.map((t) => t.address).join(" ")}`);
+    const waitFor = (streak[role] ?? 0) >= MAX_STREAK ? BACKOFF_MS : GRACE_MS;
+    if (launchedAt !== undefined && now - launchedAt < waitFor && (mine.length > 0 || waitFor === BACKOFF_MS)) {
+      actions.push(
+        waitFor === BACKOFF_MS ? `BACKOFF ${role} after ${streak[role]} failed relaunches` : `WAIT ${role} starting`,
+      );
       continue;
     }
     if (mine.length > 0) {
@@ -168,60 +174,21 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
     setRole(p, role, address);
     st.launched[role] = now;
     delete st.agentless[role];
+    streak[role] = (streak[role] ?? 0) + 1;
     actions.push(`RELAUNCH ${role}=hc:${address} (${why})`);
+    if (streak[role] === MAX_STREAK) {
+      const msg = `dori supervisor: the ${role} session was relaunched ${MAX_STREAK} times in a row and its agent never started. It now retries every ${BACKOFF_MS / 60_000} minutes. Last reason: ${why}. Log: ~/Library/Logs/dori-supervisor.log`;
+      actions.push(`ERR ${role} keeps failing to start; ${await alertOwner(sys, p, msg)}`);
+    }
   }
   actions.push(...(await tendListeners(sys, p, st, terms, procs, lead, now)));
-  writeFileSync(stateFile, `${JSON.stringify(st)}\n`);
   const summary =
     actions.length > 0 ? actions.join("; ") : `OK ${ROLES.map((r) => `${r}=${roles[r] ?? "-"}`).join(" ")}`;
   if (actions.length > 0 || summary !== st.lastSummary || now - (st.lastLogAt ?? 0) > OK_LOG_EVERY_MS) {
     sys.log(summary);
     st.lastSummary = summary;
     st.lastLogAt = now;
-    writeFileSync(stateFile, `${JSON.stringify(st)}\n`);
   }
+  writeFileSync(stateFile, `${JSON.stringify(st)}\n`);
   return 0;
-}
-
-/** Listeners belong to the lead: orphans outside every group terminal are stopped, missing ones are asked for. */
-async function tendListeners(
-  sys: Sys,
-  p: Paths,
-  st: State,
-  terms: readonly Term[],
-  procs: Parameters<typeof alive>[2],
-  lead: Term | undefined,
-  now: number,
-): Promise<string[]> {
-  const out: string[] = [];
-  const inGroup = treeOf(
-    procs,
-    terms.map((t) => t.pid),
-  );
-  const leadTree = lead ? treeOf(procs, [lead.pid]) : new Set<number>();
-  const missing: string[] = [];
-  for (const l of listeners(p)) {
-    const all = procs.filter((pr) => l.match.test(pr.cmd));
-    const orphans = all.filter((pr) => !inGroup.has(pr.pid));
-    for (const o of orphans) await sys.run(["kill", String(o.pid)]);
-    if (orphans.length > 0) out.push(`KILL orphaned ${l.kind} listener pid ${orphans.map((o) => o.pid).join(" ")}`);
-    if (!all.some((pr) => leadTree.has(pr.pid))) missing.push(l.kind);
-  }
-  const fresh = st.launched.lead !== undefined && now - st.launched.lead < GRACE_MS;
-  if (!lead || fresh || missing.length === 0) {
-    if (missing.length === 0) delete st.nudgedAt;
-    return out;
-  }
-  if (st.nudgedAt !== undefined && now - st.nudgedAt < NUDGE_EVERY_MS) return out;
-  const cmds = listeners(p)
-    .filter((l) => missing.includes(l.kind))
-    .map((l) => `- \`${l.command}\``)
-    .join("\n");
-  const text = `[SUPERVISOR] Your inbound listener(s) ${missing.join(", ")} are not running under this session, so messages from the owner are not reaching you. Arm each as a PERSISTENT monitor now (filter ^(INBOUND|WARN|ERR)) and do not reply to this message:\n${cmds}`;
-  const r = await sys.run([p.bun, join(p.repo, "src", "cli.ts"), "send", "lead", "--text", text], {
-    DORI_HOME: p.home,
-  });
-  st.nudgedAt = now;
-  out.push(`NUDGE lead to arm ${missing.join(",")}: ${(r.out || r.err).trim().split("\n")[0] ?? r.code}`);
-  return out;
 }

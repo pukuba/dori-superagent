@@ -38,4 +38,6 @@ export type Paths = {
   readonly bun: string;
   readonly agentCmd: string;
   readonly shell: string;
+  /** The dori CLI as a shell command (`dori up`'s doriCmd): fills {{dori}} in prompts and runs the loops. */
+  readonly doriCmd: string;
 };
