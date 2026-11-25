@@ -17,6 +17,8 @@ export class Machine {
   failing = new Set<string>();
   onLs: () => void = () => {};
   onSleep: () => void = () => {};
+  /** What `hc read` shows per terminal address. */
+  screens = new Map<string, string>();
   logs: string[] = [];
   clock = 1_000_000;
   next = 100;
@@ -58,6 +60,7 @@ export class Machine {
     if (b === "ls") this.onLs();
     if (b === "ls") return ok({ terminals: [...this.terms.keys()].map((address) => ({ address, state: "live" })) });
     if (b === "get") return ok({ ...this.terms.get(c!), address: c, cwd: `/work/${c}` });
+    if (b === "read") return ok({ complete: true, how: "screen", text: this.screens.get(c!) ?? "" });
     if (b === "kill" || b === "rm") {
       this.terms.delete(c!);
       return ok({});

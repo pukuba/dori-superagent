@@ -80,13 +80,15 @@ Arm these as persistent monitors in your own session:
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD_PANE\|UNRECOGNISED_PANE)` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT\|STALLED\|JOURNAL-ERROR\|WORKING-WHILE-PAUSED)` |
-| Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
+| Slack inbound (Slack only) | `DORI_SLACK_OWNER_ID=… dori inbound slack --loop 1` | `^INBOUND` |
 | Telegram inbound (Telegram only) | `DORI_TELEGRAM_TOKEN=… DORI_TELEGRAM_OWNER_ID=… dori inbound telegram --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
 
 ## 6. Supervisor (macOS, hc)
 
 Install the LaunchAgent that keeps the harness alive (label `dev.dori.supervisor.<group>`, one per dori home; `install` prints its plist path): `DORI_HOME=~/.dori bun scripts/supervisor/main.ts install` in the dori-superagent checkout. Every 60 seconds and at login it checks that the hc core is up, that the lead, duty and both loops are alive and registered, and that the lead runs its inbound listeners. It repairs whatever is missing: it starts the core, re-registers a live session, and relaunches a lost lead with a handoff prompt (`prompts/supervisor-handoff.md`). It nudges the lead to re-arm missing listeners (a listener counts only while it runs under the lead, since its lines reach only the session that armed it) and stops orphaned ones. It never opens a second lead while one is alive. The log is `~/Library/Logs/dori-supervisor.log`; `pause` and `resume` stop and restart repairs. To restart the host, use `restart-host --text '<why>'`, never a direct restart.
+
+The supervisor also watches the owner's wait for an answer. The inbound listeners note in `<stateDir>/owner-wait.json` when the owner writes (a Telegram DM from `DORI_TELEGRAM_OWNER_ID`, or a Slack line from `DORI_SLACK_OWNER_ID`; put both in the env files), and every `dori send slack|telegram` clears it. Once the owner has waited 10 minutes, the supervisor alerts them on Telegram, at most once per wait and once per 30 minutes. If the lead's screen also stays unchanged for 20 more minutes and shows no provider limit, it replaces the lead once with a handoff that says why. A lead that hit a rate or usage limit is reported, never replaced.
 
 ## 7. First look around
 

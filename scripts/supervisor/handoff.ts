@@ -35,14 +35,14 @@ export function writeHandoff(p: Paths, why: string, sys: Sys): () => void {
   return retire;
 }
 
-/** Tells the owner once, over Telegram when this home has it, that a role keeps failing to start. Never throws. */
+/** Tells the owner over Telegram, when this home has it. Never throws; DORI_NOT_A_REPLY keeps it from ending an owner wait. */
 export async function alertOwner(sys: Sys, p: Paths, text: string): Promise<string> {
   const env = join(p.home, "telegram.env");
   if (!existsSync(env)) return "no telegram.env to alert through";
   const file = join(supervisorDir(p), "alert.txt");
   writeFileSync(file, text);
   const dir = join(p.repo, "skills", "dori-mode", "scripts");
-  const script = `. "$1"; cd "$2" && bun src/cli.ts send telegram --to "$DORI_TELEGRAM_OWNER_ID" --text "$(cat "$3")"`;
+  const script = `. "$1"; cd "$2" && DORI_NOT_A_REPLY=1 bun src/cli.ts send telegram --to "$DORI_TELEGRAM_OWNER_ID" --text "$(cat "$3")"`;
   const r = await sys.run(["/bin/bash", "-c", script, "alert", env, dir, file]);
   return r.code === 0 ? "alerted the owner on Telegram" : `alert failed (exit ${r.code})`;
 }

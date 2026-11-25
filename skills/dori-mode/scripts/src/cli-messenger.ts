@@ -2,6 +2,7 @@
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
+import { ownerSpoke, slackOwnerWhere, telegramOwnerWhere, yenaReplied } from "./messenger/owner-wait.ts";
 import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -37,7 +38,10 @@ const send: Command = async ({ key, need, opt, values, config }) => {
       new ThreadLedger(`${config.stateDir}/slack-threads.json`),
     );
     if (ts !== undefined) await slack.edit(to, ts, text);
-    else console.log(`SENT ${(await slack.post(to, text, threadTs)).ts}`);
+    else {
+      console.log(`SENT ${(await slack.post(to, text, threadTs)).ts}`);
+      replied(config.stateDir);
+    }
   } else if (platform === "telegram") {
     // Number("telegram:-1001/42") is NaN, and the Telegram target drops a falsy threadId, so a bad --thread
     // would post to the group's General topic. A flag given empty (--thread "$UNSET") is refused too: no topic
@@ -54,7 +58,10 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     const messageId = id("edit", "message");
     const tg = new Telegram(fetchHttp, realClock, token("DORI_TELEGRAM_TOKEN"));
     if (messageId !== undefined) await tg.edit(target, messageId, text);
-    else console.log(`SENT ${await tg.send(target, text)}`);
+    else {
+      console.log(`SENT ${await tg.send(target, text)}`);
+      replied(config.stateDir);
+    }
   } else if (platform === "discord") {
     const messageId = present("edit");
     const thread = present("thread");
@@ -62,6 +69,11 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     if (messageId !== undefined) await dc.edit(to, messageId, text);
     else console.log(`SENT ${await dc.send(thread ?? to, text)}`);
   } else die(`unknown platform ${platform}`);
+};
+
+/** A posted message answers the owner, except the supervisor's own alert (DORI_NOT_A_REPLY=1): that one is not yena. */
+const replied = (stateDir: string): void => {
+  if (process.env["DORI_NOT_A_REPLY"] !== "1") yenaReplied(stateDir);
 };
 
 const presence: Command = async ({ key }) => {
@@ -133,7 +145,11 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
       ...(topicId !== undefined ? { topicId } : {}),
     },
     minutes,
-    (i) => console.log(formatTelegramInbound(i)),
+    (i) => {
+      console.log(formatTelegramInbound(i));
+      const where = telegramOwnerWhere(i, ownerId);
+      if (where) ownerSpoke(stateDir, where);
+    },
     (m) => console.log(`WARN ${m}`.slice(0, 300)),
   );
 };
@@ -146,17 +162,23 @@ const inbound: Command = async ({ key, loopMinutes, config }) => {
   const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
   const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
   const me = String((await slack.call("auth.test", {}))["user_id"] ?? die("auth.test returned no user_id"));
+  const owner = process.env["DORI_SLACK_OWNER_ID"] || undefined;
   console.log("INBOUND_READY slack");
+  if (!owner)
+    console.log("WARN DORI_SLACK_OWNER_ID is not set: the supervisor cannot tell when the owner waits on Slack");
   const told = new Set<string>();
   const warn = (message: string) => {
     if (!told.has(message)) console.log(`WARN ${message}`.slice(0, 300));
     told.add(message);
   };
   await every(minutes, async () => {
-    for (const i of await pollSlackInbound(slack, ledger, { selfUserId: me, warn }))
+    for (const i of await pollSlackInbound(slack, ledger, { selfUserId: me, warn })) {
       console.log(
         `INBOUND ${i.source} ${i.channel} ${i.threadTs ?? "-"} ${i.ts || "-"} ${i.user ?? "-"} ${JSON.stringify((i.text ?? "").slice(0, 200))}`,
       );
+      const where = slackOwnerWhere(i, owner);
+      if (where) ownerSpoke(config.stateDir, where);
+    }
   });
 };
 
