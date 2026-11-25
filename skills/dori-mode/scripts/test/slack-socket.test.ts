@@ -1,97 +1,14 @@
 import { afterAll, expect, test } from "bun:test";
 import { join } from "node:path";
 
-import type { Http, HttpRequest, HttpResponse } from "../src/messenger/http.ts";
-import { formatSlackInbound, type Inbound } from "../src/messenger/slack-inbound.ts";
-import {
-  inboundSink,
-  nameCaller,
-  type OpenSocket,
-  runSlackSocket,
-  type SocketHandlers,
-  type SocketModeOptions,
-} from "../src/messenger/slack-socket.ts";
+import { formatSlackInbound } from "../src/messenger/slack-inbound.ts";
+import { inboundSink, nameCaller } from "../src/messenger/slack-socket.ts";
 import { ThreadLedger } from "../src/messenger/thread-ledger.ts";
 import { withState } from "./fakes.ts";
+import { BOT, event, frame, harness, SELF } from "./slack-socket-harness.ts";
 
-const SELF = "U_YENA";
-const BOT = "B_YENA";
 const state = withState();
 afterAll(() => state.done());
-
-type FakeSocket = { url: string; h: SocketHandlers; sent: string[]; closed: boolean };
-
-const harness = (openFailures = 0, extra: Partial<SocketModeOptions> = {}) => {
-  const sockets: FakeSocket[] = [];
-  const waiters: (() => void)[] = [];
-  const opens: string[] = [];
-  let failures = openFailures;
-  const http: Http = async (req: HttpRequest): Promise<HttpResponse> => {
-    opens.push(String(req.headers?.["Authorization"]));
-    if (failures-- > 0)
-      return { status: 200, headers: {}, body: JSON.stringify({ ok: false, error: "internal_error" }) };
-    return { status: 200, headers: {}, body: JSON.stringify({ ok: true, url: `wss://fake/${opens.length}` }) };
-  };
-  const open: OpenSocket = (url, h) => {
-    const s: FakeSocket = { url, h, sent: [], closed: false };
-    sockets.push(s);
-    for (const w of waiters.splice(0)) w();
-    return {
-      send: (d) => s.sent.push(d),
-      close: () => {
-        if (s.closed) return;
-        s.closed = true;
-        queueMicrotask(() => h.onClose());
-      },
-    };
-  };
-  const socket = (n: number): Promise<FakeSocket> =>
-    new Promise((resolve) => {
-      const check = () => {
-        const s = sockets[n - 1];
-        if (s) resolve(s);
-        else waiters.push(check);
-      };
-      check();
-    });
-  const slept: number[] = [];
-  const emitted: Inbound[] = [];
-  const emitWaiters: (() => void)[] = [];
-  const emittedCount = (n: number): Promise<void> =>
-    new Promise((resolve) => {
-      const check = () => (emitted.length >= n ? resolve() : emitWaiters.push(check));
-      check();
-    });
-  const warned: string[] = [];
-  let readies = 0;
-  const abort = new AbortController();
-  const run = runSlackSocket({
-    http,
-    clock: { now: () => 0, sleep: async (ms: number) => void slept.push(ms) },
-    appToken: "xapp-test",
-    open,
-    selfUserId: SELF,
-    selfBotId: BOT,
-    emit: (i) => {
-      emitted.push(i);
-      for (const w of emitWaiters.splice(0)) w();
-    },
-    ready: () => void readies++,
-    warn: (m) => void warned.push(m),
-    base: "https://slack.test/api",
-    signal: abort.signal,
-    ...extra,
-  });
-  const stop = async () => {
-    abort.abort();
-    await run;
-  };
-  return { socket, opens, slept, emitted, emittedCount, warned, readies: () => readies, stop };
-};
-
-const frame = (s: FakeSocket, value: object) => s.h.onMessage(JSON.stringify(value));
-const event = (s: FakeSocket, id: string, e: object) =>
-  frame(s, { type: "events_api", envelope_id: id, payload: { event: e } });
 
 test("every envelope is acked by its id; app_mention and a human DM become INBOUND lines, the rest are dropped", async () => {
   const h = harness();
@@ -207,34 +124,5 @@ test("a reply in a channel thread the bot posted in arrives without the name; ot
   reply("t3", { ts: "43.1", thread_ts: "40.1", user: "U_X", bot_id: "B9", text: "bot" });
   await h.emittedCount(1);
   expect(h.emitted.map(formatSlackInbound)).toEqual(['INBOUND own-thread C1 40.1 42.1 U_OWNER "그거 다시 해줘"']);
-  await h.stop();
-});
-
-test("a disconnect envelope reopens the socket at once; the second hello is a reconnect, not a second READY", async () => {
-  const h = harness();
-  const first = await h.socket(1);
-  frame(first, { type: "hello" });
-  frame(first, { type: "disconnect", envelope_id: "d1", reason: "refresh_requested" });
-  expect(first.sent).toEqual([JSON.stringify({ envelope_id: "d1" })]);
-  const second = await h.socket(2);
-  expect(second.url).toBe("wss://fake/2");
-  expect(first.closed).toBe(true);
-  frame(second, { type: "hello" });
-  expect(h.readies()).toBe(1);
-  expect(h.slept).toEqual([]);
-  expect(h.warned).toEqual(["slack socket disconnect (refresh_requested); reconnecting", "slack socket reconnected"]);
-  await h.stop();
-});
-
-test("a dropped socket and failed opens back off, doubling, and a hello resets the backoff", async () => {
-  const h = harness(2);
-  const first = await h.socket(1);
-  expect(h.slept).toEqual([1000, 2000]);
-  frame(first, { type: "hello" });
-  first.h.onClose();
-  const second = await h.socket(2);
-  expect(h.slept).toEqual([1000, 2000, 1000]);
-  expect(second.url).toBe("wss://fake/4");
-  expect(h.warned.at(-1)).toBe("slack socket closed; reconnecting in 1s");
   await h.stop();
 });

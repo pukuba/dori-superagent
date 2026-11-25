@@ -111,6 +111,7 @@ test("an inherited DORI_SLACK_TOKEN_FILE outside this home is refused unless the
     [RESOLVED_HOME]: real(home),
     DORI_SLACK_TOKEN: "",
     [OUTSIDE_HOME_FLAG]: "",
+    DORI_SLACK_APP_TOKEN_FILE: "",
   });
   // Unset, the home's own file is used; a file inside the home is passed as named.
   const ok = (file: string) => ({
@@ -119,6 +120,7 @@ test("an inherited DORI_SLACK_TOKEN_FILE outside this home is refused unless the
     [RESOLVED_HOME]: real(home),
     DORI_SLACK_TOKEN: "",
     [OUTSIDE_HOME_FLAG]: "",
+    DORI_SLACK_APP_TOKEN_FILE: "",
   });
   expect(laneTokenEnv({}, config)).toEqual(ok(join(home, "slack-token")));
   const nested = tokenFile(join(home, "keys"), "xoxb-nested\n", 0o600);

@@ -76,25 +76,28 @@ export const slackToken = (
   return path ? readTokenFile(path, platform, uid) : undefined;
 };
 
+/** Names the Socket Mode app token (xapp) file. There is no raw-token variable: the token never sits in an env. */
+export const APP_TOKEN_FILE = "DORI_SLACK_APP_TOKEN_FILE";
+
 /**
- * The Socket Mode app token (xapp) from DORI_SLACK_APP_TOKEN when set, else from the file DORI_SLACK_APP_TOKEN_FILE names,
- * read with the same single-descriptor owner-only checks as the bot token's file.
+ * The Socket Mode app token from the file DORI_SLACK_APP_TOKEN_FILE names: resolved once, refused outside this home
+ * unless OUTSIDE_HOME_FLAG is 1 (as for the bot token's file), then read with the same single-descriptor owner-only checks.
  */
 export const slackAppToken = (
   env: Env = process.env,
   platform: string = process.platform,
   uid: Uid = process.getuid?.(),
+  configFile: string = configPath(),
 ): string | undefined => {
-  const token = env["DORI_SLACK_APP_TOKEN"];
-  if (token) return token;
-  const named = env["DORI_SLACK_APP_TOKEN_FILE"];
+  const named = env[APP_TOKEN_FILE];
   if (!named) return undefined;
-  return readTokenFile(
-    real(isAbsolute(named) ? named : `${process.cwd()}${sep}${named}`),
-    platform,
-    uid,
-    "DORI_SLACK_APP_TOKEN_FILE",
-  );
+  const home = homeOf(configFile);
+  const file = real(isAbsolute(named) ? named : `${process.cwd()}${sep}${named}`);
+  if (!inside(home, file) && env[OUTSIDE_HOME_FLAG] !== "1")
+    throw new TokenFileError(
+      `${APP_TOKEN_FILE} ${file} is outside this home (${home}), so it may be another home's; set ${OUTSIDE_HOME_FLAG}=1 if it is meant`,
+    );
+  return readTokenFile(file, platform, uid, APP_TOKEN_FILE);
 };
 
 /** Set by launch beside DORI_SLACK_TOKEN_FILE to the same string: the path a lane gets is already resolved. */
@@ -195,7 +198,8 @@ export const homeTokenFile = (env: Env, configFile: string): string | undefined 
  * variable over), so it is refused unless DORI_SLACK_TOKEN_FILE_OUTSIDE_HOME=1 says it was meant. With no token file at
  * all nothing is added, as before. DORI_SLACK_TOKEN is passed empty: an hc lane inherits the core's env, which may hold
  * another home's token, and a set DORI_SLACK_TOKEN is read before the file. The allow flag is passed empty too, so a
- * lane never carries this home's permission into a home it starts.
+ * lane never carries this home's permission into a home it starts. DORI_SLACK_APP_TOKEN_FILE is passed empty: a lane
+ * holding it could open a second Socket Mode connection, and Slack gives each event to only one connection.
  */
 export const laneTokenEnv = (env: Env, configFile: string): Record<string, string> => {
   const pass = (file: string): Record<string, string> => ({
@@ -204,6 +208,7 @@ export const laneTokenEnv = (env: Env, configFile: string): Record<string, strin
     [RESOLVED_HOME]: homeOf(configFile),
     DORI_SLACK_TOKEN: "",
     [OUTSIDE_HOME_FLAG]: "",
+    [APP_TOKEN_FILE]: "",
   });
   const file = homeTokenFile(env, configFile);
   if (file) return pass(file);
@@ -216,8 +221,11 @@ export const laneTokenEnv = (env: Env, configFile: string): Record<string, strin
       throw new TokenFileError(`${own} links outside this home (${home}), so it may be another home's token file`);
     return pass(resolved);
   }
-  // No token file: nothing is added, except that an inherited allow flag is emptied so no lane carries it onward.
-  return env[OUTSIDE_HOME_FLAG] ? { [OUTSIDE_HOME_FLAG]: "" } : {};
+  // No token file: nothing is added, except that an inherited allow flag or app token file is emptied.
+  return {
+    ...(env[OUTSIDE_HOME_FLAG] ? { [OUTSIDE_HOME_FLAG]: "" } : {}),
+    ...(env[APP_TOKEN_FILE] ? { [APP_TOKEN_FILE]: "" } : {}),
+  };
 };
 
 /**

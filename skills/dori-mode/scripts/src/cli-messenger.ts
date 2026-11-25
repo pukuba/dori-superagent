@@ -4,7 +4,7 @@ import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
 import { formatSlackInbound, pollSlackInbound } from "./messenger/slack-inbound.ts";
-import { inboundSink, nameCaller, runSlackSocket } from "./messenger/slack-socket.ts";
+import { inboundSink, laneRefusal, nameCaller, runSlackSocket } from "./messenger/slack-socket.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
 import { envInt, fileTgInboundStore, telegramInboundLoop } from "./messenger/telegram-inbound.ts";
@@ -146,18 +146,18 @@ const slackSocketInbound = async (
   minutes: number,
   names: readonly string[],
 ): Promise<void> => {
+  const refusal = laneRefusal(process.env);
+  if (refusal) return die(refusal);
   let appToken: string | undefined;
   try {
     appToken = slackAppToken();
   } catch (e) {
     die(e instanceof Error ? e.message : String(e));
   }
-  if (!appToken) return die("DORI_SLACK_APP_TOKEN is not set (nor DORI_SLACK_APP_TOKEN_FILE)");
-  const who = await slack.call("auth.test", {});
-  const me = String(who["user_id"] ?? die("auth.test returned no user_id"));
-  const botId = typeof who["bot_id"] === "string" ? who["bot_id"] : undefined;
+  if (!appToken) return die("DORI_SLACK_APP_TOKEN_FILE is not set");
+  const me = String((await slack.call("auth.test", {}))["user_id"] ?? die("auth.test returned no user_id"));
   const warn = (message: string) => console.log(`WARN ${message}`.slice(0, 300));
-  const emit = inboundSink((i) => console.log(formatSlackInbound(i)), ledger);
+  const emit = inboundSink((i) => console.log(formatSlackInbound(i)));
   const told = new Set<string>();
   const pollWarn = (message: string) => {
     if (!told.has(message)) warn(message);
@@ -168,7 +168,6 @@ const slackSocketInbound = async (
     clock: realClock,
     appToken,
     selfUserId: me,
-    selfBotId: botId,
     emit,
     callsMe: nameCaller(names),
     watchedThread: (channel, rootTs) => ledger.has(channel, rootTs),

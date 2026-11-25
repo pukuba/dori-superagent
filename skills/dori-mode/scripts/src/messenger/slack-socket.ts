@@ -1,14 +1,13 @@
 /**
  * Slack Socket Mode inbound: @mentions of the bot and DMs to it arrive within seconds, which the poll path cannot see
  * with a bot token (`client.counts` answers `not_allowed_token_type`). The app token opens a WebSocket URL through
- * `apps.connections.open`; every envelope is acked by its `envelope_id`, and the socket is reopened after a `disconnect`
- * or a drop, with backoff when it fails.
+ * `apps.connections.open`; every envelope is acked by its `envelope_id`, and the socket is reopened after a `disconnect`,
+ * a drop or a silence longer than `idleMs` (a half-open connection never closes), with backoff when it fails.
  */
 import type { Clock } from "../run.ts";
 import { type Http, MessengerError } from "./http.ts";
 import { Slack } from "./slack.ts";
 import type { Inbound } from "./slack-inbound.ts";
-import type { ThreadLedger } from "./thread-ledger.ts";
 
 export type SocketHandlers = { readonly onMessage: (data: string) => void; readonly onClose: () => void };
 export type SocketLike = { readonly send: (data: string) => void; readonly close: () => void };
@@ -20,7 +19,6 @@ export type SocketModeOptions = {
   readonly appToken: string;
   readonly open: OpenSocket;
   readonly selfUserId: string;
-  readonly selfBotId?: string | undefined;
   readonly emit: (i: Inbound) => void | Promise<void>;
   /** True when a channel message calls the bot by name (see `nameCaller`); absent = only @mentions count. */
   readonly callsMe?: (text: string) => boolean;
@@ -30,8 +28,21 @@ export type SocketModeOptions = {
   readonly warn: (message: string) => void;
   readonly base?: string;
   readonly backoff?: { readonly baseMs: number; readonly maxMs: number };
+  /** No frame for this long reopens the socket quietly (default 10 minutes). */
+  readonly idleMs?: number;
+  /** Calls `fn` after `ms` and returns its cancel; injectable for tests. */
+  readonly timer?: (fn: () => void, ms: number) => () => void;
   readonly signal?: AbortSignal;
 };
+
+/**
+ * Why this process must not open Socket Mode: a lane (DORI_LANE set) would add a second connection for the same app, and
+ * Slack gives each event to only one connection, so the lead would silently miss some.
+ */
+export const laneRefusal = (env: Readonly<Record<string, string | undefined>>): string | undefined =>
+  env["DORI_LANE"]
+    ? `inbound slack --socket runs in the lead only (DORI_LANE=${env["DORI_LANE"]}): a second Socket Mode connection takes events away from the lead's`
+    : undefined;
 
 type SlackEvent = {
   readonly type?: string;
@@ -86,11 +97,10 @@ const fromHuman = (
 export const inboundFromEvent = (
   event: SlackEvent | undefined,
   selfUserId: string,
-  selfBotId?: string,
   callsMe?: (text: string) => boolean,
 ): Inbound | undefined => {
   const e = fromHuman(event, selfUserId);
-  if (!e || (selfBotId !== undefined && e.bot_id === selfBotId)) return undefined;
+  if (!e) return undefined;
   const source =
     e.type === "app_mention"
       ? "mention"
@@ -111,14 +121,10 @@ export const threadReplyFromEvent = (event: SlackEvent | undefined, selfUserId: 
 };
 
 /**
- * One sink for the socket and the poll path in the same process: a message (channel+ts) is emitted once, and one that
- * sits in a thread the ledger watches is marked seen there, so the ledger walk does not report it again.
+ * One sink for the socket and the poll path in the same process: a message (channel+ts) is emitted once. It never moves a
+ * thread's `seenTs` in the ledger: only the poll walk does, so a reply the socket missed (a reconnect gap) is still found.
  */
-export const inboundSink = (
-  print: (i: Inbound) => void,
-  ledger?: ThreadLedger,
-  cap = 5_000,
-): ((i: Inbound) => Promise<void>) => {
+export const inboundSink = (print: (i: Inbound) => void, cap = 5_000): ((i: Inbound) => Promise<void>) => {
   const seen = new Set<string>();
   return async (i) => {
     if (i.ts) {
@@ -126,7 +132,6 @@ export const inboundSink = (
       if (seen.has(k)) return;
       seen.add(k);
       if (seen.size > cap) seen.delete(seen.values().next().value as string);
-      if (i.threadTs && ledger) await ledger.markSeen(i.channel, i.threadTs, i.ts);
     }
     print(i);
   };
@@ -137,8 +142,16 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
 export const runSlackSocket = async (o: SocketModeOptions): Promise<void> => {
   const appSlack = new Slack(o.http, o.clock, { token: o.appToken }, o.base);
   const backoff = o.backoff ?? { baseMs: 1_000, maxMs: 60_000 };
+  const idleMs = o.idleMs ?? 10 * 60_000;
+  const timer =
+    o.timer ??
+    ((fn: () => void, ms: number) => {
+      const t = setTimeout(fn, ms);
+      return () => clearTimeout(t);
+    });
   let failures = 0;
   let greeted = false;
+  let quiet = false;
   const wait = async (why: string) => {
     const ms = Math.min(backoff.maxMs, backoff.baseMs * 2 ** failures);
     failures++;
@@ -158,9 +171,11 @@ export const runSlackSocket = async (o: SocketModeOptions): Promise<void> => {
     const end = await new Promise<"disconnect" | "closed">((resolve) => {
       let done = false;
       let sock: SocketLike | undefined;
+      let cancelIdle = () => {};
       const finish = (why: "disconnect" | "closed") => {
         if (done) return;
         done = true;
+        cancelIdle();
         o.signal?.removeEventListener("abort", abort);
         resolve(why);
       };
@@ -169,7 +184,17 @@ export const runSlackSocket = async (o: SocketModeOptions): Promise<void> => {
         finish("closed");
       };
       o.signal?.addEventListener("abort", abort, { once: true });
+      const armIdle = () => {
+        cancelIdle();
+        cancelIdle = timer(() => {
+          quiet = true;
+          finish("disconnect");
+          sock?.close();
+        }, idleMs);
+      };
       const onMessage = (data: string) => {
+        if (done) return;
+        armIdle();
         let env: Envelope;
         try {
           env = JSON.parse(data) as Envelope;
@@ -180,16 +205,17 @@ export const runSlackSocket = async (o: SocketModeOptions): Promise<void> => {
         if (env.envelope_id) sock?.send(JSON.stringify({ envelope_id: env.envelope_id }));
         if (env.type === "hello") {
           failures = 0;
-          if (greeted) o.warn("slack socket reconnected");
-          else o.ready();
+          if (!greeted) o.ready();
+          else if (!quiet) o.warn("slack socket reconnected");
           greeted = true;
+          quiet = false;
         } else if (env.type === "disconnect") {
           o.warn(`slack socket disconnect (${env.reason ?? "no reason"}); reconnecting`);
           finish("disconnect");
           sock?.close();
         } else if (env.type === "events_api") {
           const event = env.payload?.event;
-          const i = inboundFromEvent(event, o.selfUserId, o.selfBotId, o.callsMe);
+          const i = inboundFromEvent(event, o.selfUserId, o.callsMe);
           const reply = i || !o.watchedThread ? undefined : threadReplyFromEvent(event, o.selfUserId);
           const watched = o.watchedThread;
           const emitted = i
@@ -200,7 +226,14 @@ export const runSlackSocket = async (o: SocketModeOptions): Promise<void> => {
           emitted?.catch((e: unknown) => o.warn(`slack socket emit: ${message(e)}`));
         }
       };
-      sock = o.open(url, { onMessage, onClose: () => finish("closed") });
+      try {
+        sock = o.open(url, { onMessage, onClose: () => finish("closed") });
+      } catch (e) {
+        o.warn(`slack socket open: ${message(e)}`);
+        finish("closed");
+        return;
+      }
+      armIdle();
       if (o.signal?.aborted) abort();
     });
     if (o.signal?.aborted) return;
