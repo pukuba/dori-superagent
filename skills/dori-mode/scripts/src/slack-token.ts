@@ -26,7 +26,7 @@ type Uid = number | undefined;
  * and owner-only (no group or other bits). The mode and owner are POSIX checks: on Windows stat reports 0666 or 0444 and
  * no uid, so there the NTFS ACL is the owner's job and boot says so (WIN32_ACL_NOTICE).
  */
-const readTokenFile = (path: string, platform: string, uid: Uid): string => {
+const readTokenFile = (path: string, platform: string, uid: Uid, name = "DORI_SLACK_TOKEN_FILE"): string => {
   // `path` is already resolved (see tokenFileToRead). POSIX opens it as-is with O_NOFOLLOW, so a link put at that name
   // after it was resolved is refused, never followed.
   const posix = platform !== "win32";
@@ -34,26 +34,26 @@ const readTokenFile = (path: string, platform: string, uid: Uid): string => {
   try {
     fd = openSync(path, constants.O_RDONLY | (posix ? constants.O_NONBLOCK | constants.O_NOFOLLOW : 0));
   } catch {
-    throw new TokenFileError(`DORI_SLACK_TOKEN_FILE ${path} cannot be read`);
+    throw new TokenFileError(`${name} ${path} cannot be read`);
   }
   try {
     const st = fstatSync(fd);
-    if (!st.isFile()) throw new TokenFileError(`DORI_SLACK_TOKEN_FILE ${path} is not a regular file`);
+    if (!st.isFile()) throw new TokenFileError(`${name} ${path} is not a regular file`);
     if (platform !== "win32") {
       if (uid !== undefined && st.uid !== uid)
-        throw new TokenFileError(`DORI_SLACK_TOKEN_FILE ${path} is owned by uid ${st.uid}, not by this user (${uid})`);
+        throw new TokenFileError(`${name} ${path} is owned by uid ${st.uid}, not by this user (${uid})`);
       if ((st.mode & 0o077) !== 0)
         throw new TokenFileError(
-          `DORI_SLACK_TOKEN_FILE ${path} is open to group or others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it`,
+          `${name} ${path} is open to group or others (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it`,
         );
     }
     let value: string;
     try {
       value = readFileSync(fd, "utf8").trim();
     } catch {
-      throw new TokenFileError(`DORI_SLACK_TOKEN_FILE ${path} cannot be read`);
+      throw new TokenFileError(`${name} ${path} cannot be read`);
     }
-    if (!value) throw new TokenFileError(`DORI_SLACK_TOKEN_FILE ${path} is empty`);
+    if (!value) throw new TokenFileError(`${name} ${path} is empty`);
     return value;
   } finally {
     closeSync(fd);
@@ -74,6 +74,27 @@ export const slackToken = (
   if (token) return token;
   const path = tokenFileToRead(env, configFile);
   return path ? readTokenFile(path, platform, uid) : undefined;
+};
+
+/**
+ * The Socket Mode app token (xapp) from DORI_SLACK_APP_TOKEN when set, else from the file DORI_SLACK_APP_TOKEN_FILE names,
+ * read with the same single-descriptor owner-only checks as the bot token's file.
+ */
+export const slackAppToken = (
+  env: Env = process.env,
+  platform: string = process.platform,
+  uid: Uid = process.getuid?.(),
+): string | undefined => {
+  const token = env["DORI_SLACK_APP_TOKEN"];
+  if (token) return token;
+  const named = env["DORI_SLACK_APP_TOKEN_FILE"];
+  if (!named) return undefined;
+  return readTokenFile(
+    real(isAbsolute(named) ? named : `${process.cwd()}${sep}${named}`),
+    platform,
+    uid,
+    "DORI_SLACK_APP_TOKEN_FILE",
+  );
 };
 
 /** Set by launch beside DORI_SLACK_TOKEN_FILE to the same string: the path a lane gets is already resolved. */

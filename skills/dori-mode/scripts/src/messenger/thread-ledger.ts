@@ -47,6 +47,21 @@ export class ThreadLedger {
     await this.save();
   }
 
+  /**
+   * Whether the bot has posted in this thread. The file is read again first, merging in what it holds: `dori send` runs
+   * in another process and records the threads a long-running inbound must recognise.
+   */
+  async has(channel: string, rootTs: string): Promise<boolean> {
+    await this.load();
+    const f = Bun.file(this.file);
+    if (await f.exists())
+      for (const t of (await f.json()) as LedgerThread[]) {
+        const prev = this.threads.get(this.key(t.channel, t.rootTs));
+        if (!prev || tsAfter(t.seenTs, prev.seenTs)) this.threads.set(this.key(t.channel, t.rootTs), t);
+      }
+    return this.threads.has(this.key(channel, rootTs));
+  }
+
   async list(): Promise<LedgerThread[]> {
     await this.load();
     return [...this.threads.values()];

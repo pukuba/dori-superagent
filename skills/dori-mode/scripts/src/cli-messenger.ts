@@ -3,7 +3,8 @@ import { type Command, die, envSlackToken, every, slackAuth } from "./cli-contex
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
-import { pollSlackInbound } from "./messenger/slack-inbound.ts";
+import { formatSlackInbound, pollSlackInbound } from "./messenger/slack-inbound.ts";
+import { inboundSink, nameCaller, runSlackSocket } from "./messenger/slack-socket.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
 import { envInt, fileTgInboundStore, telegramInboundLoop } from "./messenger/telegram-inbound.ts";
@@ -12,6 +13,7 @@ import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { realTimers } from "./messenger/typing.ts";
 import { transcribe, TranscriptionError } from "./messenger/voice.ts";
 import { realClock, run } from "./run.ts";
+import { slackAppToken } from "./slack-token.ts";
 
 /** Messenger errors are one line, never a stack. */
 export const messengerErrors = [MessengerError, UnsafeMessageError, TranscriptionError] as const;
@@ -138,13 +140,61 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
   );
 };
 
-const inbound: Command = async ({ key, loopMinutes, config }) => {
+const slackSocketInbound = async (
+  slack: Slack,
+  ledger: ThreadLedger,
+  minutes: number,
+  names: readonly string[],
+): Promise<void> => {
+  let appToken: string | undefined;
+  try {
+    appToken = slackAppToken();
+  } catch (e) {
+    die(e instanceof Error ? e.message : String(e));
+  }
+  if (!appToken) return die("DORI_SLACK_APP_TOKEN is not set (nor DORI_SLACK_APP_TOKEN_FILE)");
+  const who = await slack.call("auth.test", {});
+  const me = String(who["user_id"] ?? die("auth.test returned no user_id"));
+  const botId = typeof who["bot_id"] === "string" ? who["bot_id"] : undefined;
+  const warn = (message: string) => console.log(`WARN ${message}`.slice(0, 300));
+  const emit = inboundSink((i) => console.log(formatSlackInbound(i)), ledger);
+  const told = new Set<string>();
+  const pollWarn = (message: string) => {
+    if (!told.has(message)) warn(message);
+    told.add(message);
+  };
+  const socket = runSlackSocket({
+    http: fetchHttp,
+    clock: realClock,
+    appToken,
+    selfUserId: me,
+    selfBotId: botId,
+    emit,
+    callsMe: nameCaller(names),
+    watchedThread: (channel, rootTs) => ledger.has(channel, rootTs),
+    ready: () => console.log("INBOUND_READY slack socket"),
+    warn,
+    open: (url, h) => {
+      const ws = new WebSocket(url);
+      ws.addEventListener("message", (e) => h.onMessage(String(e.data)));
+      ws.addEventListener("close", () => h.onClose());
+      return { send: (d) => ws.send(d), close: () => ws.close() };
+    },
+  });
+  const poll = every(minutes, async () => {
+    for (const i of await pollSlackInbound(slack, ledger, { selfUserId: me, warn: pollWarn })) await emit(i);
+  });
+  await Promise.all([socket, poll]);
+};
+
+const inbound: Command = async ({ key, loopMinutes, config, values }) => {
   const minutes = loopMinutes();
   if (key === "telegram") return await telegramInbound(config.stateDir, minutes);
   if (key !== "slack") die("inbound supports slack or telegram");
   const auth = slackAuth(envSlackToken() ?? die(NO_SLACK_TOKEN));
   const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
   const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
+  if (values["socket"] === true) return await slackSocketInbound(slack, ledger, minutes, config.slackNames);
   const me = String((await slack.call("auth.test", {}))["user_id"] ?? die("auth.test returned no user_id"));
   console.log("INBOUND_READY slack");
   const told = new Set<string>();
@@ -153,10 +203,7 @@ const inbound: Command = async ({ key, loopMinutes, config }) => {
     told.add(message);
   };
   await every(minutes, async () => {
-    for (const i of await pollSlackInbound(slack, ledger, { selfUserId: me, warn }))
-      console.log(
-        `INBOUND ${i.source} ${i.channel} ${i.threadTs ?? "-"} ${i.ts || "-"} ${i.user ?? "-"} ${JSON.stringify((i.text ?? "").slice(0, 200))}`,
-      );
+    for (const i of await pollSlackInbound(slack, ledger, { selfUserId: me, warn })) console.log(formatSlackInbound(i));
   });
 };
 

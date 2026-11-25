@@ -3,13 +3,16 @@ import type { Slack } from "./slack.ts";
 import { type ThreadLedger, tsAfter } from "./thread-ledger.ts";
 
 export type Inbound = {
-  readonly source: "threads-view" | "own-thread" | "unread";
+  readonly source: "threads-view" | "own-thread" | "unread" | "mention" | "dm" | "namecall";
   readonly channel: string;
   readonly ts: string;
   readonly threadTs?: string | undefined;
   readonly user?: string | undefined;
   readonly text?: string | undefined;
 };
+
+export const formatSlackInbound = (i: Inbound): string =>
+  `INBOUND ${i.source} ${i.channel} ${i.threadTs ?? "-"} ${i.ts || "-"} ${i.user ?? "-"} ${JSON.stringify((i.text ?? "").slice(0, 200))}`;
 
 type Msg = {
   readonly ts?: string;

@@ -80,9 +80,11 @@ Arm these as persistent monitors in your own session:
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD_PANE\|UNRECOGNISED_PANE)` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT\|STALLED\|JOURNAL-ERROR\|WORKING-WHILE-PAUSED)` |
-| Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
+| Slack inbound (Slack only) | `dori inbound slack --loop 1`, or `dori inbound slack --socket --loop 1` (below) | `^INBOUND` |
 | Telegram inbound (Telegram only) | `DORI_TELEGRAM_TOKEN=… DORI_TELEGRAM_OWNER_ID=… dori inbound telegram --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
+
+Slack Socket Mode (bot token only) delivers @mentions and DMs within seconds instead of on the next poll. Turn on Socket Mode for the app, subscribe it to `app_mention`, `message.im` and `message.channels`, create an app-level token with `connections:write`, write it to a file (`chmod 600`) and point `DORI_SLACK_APP_TOKEN_FILE` at it. `--socket` also prints channel messages that call the bot by a name in `slackNames` (config.json, or `DORI_SLACK_NAMES="a,b"`; empty by default) and replies in channel threads the bot posted in, and keeps running the poll above once or every `--loop` minutes. Each message is printed once across both paths.
 
 ## 6. First look around
 

@@ -55,7 +55,10 @@ const USAGE = `dori <command> [options]
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack|telegram [--loop MIN]  print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
-                                       the Dori posted in (any helper), DMs and channels with unread mentions`;
+                                       the Dori posted in (any helper), DMs and channels with unread mentions
+  inbound slack --socket [--loop MIN]  Slack Socket Mode (DORI_SLACK_APP_TOKEN_FILE): @mentions and DMs within seconds,
+                                       channel messages calling a name in slackNames / DORI_SLACK_NAMES (namecall),
+                                       replies in channel threads the Dori posted in (own-thread), plus the poll above once (or every MIN), each message once`;
 
 const config = await loadConfig().catch((e: unknown) =>
   e instanceof ConfigError ? die(e.message) : Promise.reject(e),
@@ -79,6 +82,7 @@ const flags = parseArgs({
     reason: { type: "string", multiple: true },
     note: { type: "string" },
     write: { type: "boolean" },
+    socket: { type: "boolean" },
     loop: { type: "string" },
     to: { type: "string" },
     text: { type: "string" },

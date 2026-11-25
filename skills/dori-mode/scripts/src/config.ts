@@ -2,6 +2,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { RuntimeKind, TerminalKind } from "../../../../src/runtime/types.ts";
+import { envSlackNames, isSlackNames } from "./slack-names.ts";
 import type { SupervisionOptions } from "./supervision-observe.ts";
 import type { CommitIdentity } from "./verify-pr-check.ts";
 
@@ -55,6 +56,8 @@ export type DoriConfig = {
   /** Expected Git author and committer per lowercase `owner/repo`, for `verify-pr` and the lane footer. */
   readonly repoIdentities: Readonly<Record<string, CommitIdentity>>;
   readonly supervision: SupervisionOptions;
+  /** Names that call the bot in a Slack channel without an @mention (`inbound slack --socket`); DORI_SLACK_NAMES wins. */
+  readonly slackNames: readonly string[];
 };
 
 export const defaultConfig = (home = homedir()): DoriConfig => ({
@@ -86,6 +89,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
     staleAfterMinutes: 20,
     defaults: { wallMinutes: null, tokens: null, costUsd: null },
   },
+  slackNames: [],
 });
 
 export const configPath = (): string => process.env["DORI_CONFIG"] ?? join(homedir(), ".dori", "config.json");
@@ -186,6 +190,8 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
   checkRuntime("laneRuntime", raw.laneRuntime, LANE_RUNTIMES);
   checkRuntime("leadRuntime", raw.leadRuntime, LANE_RUNTIMES);
   checkSupervision(raw.supervision);
+  if (raw.slackNames !== undefined && !isSlackNames(raw.slackNames))
+    throw new ConfigError("invalid slackNames: expected an array of non-empty strings");
   const merged: DoriConfig = {
     ...base,
     ...raw,
@@ -235,6 +241,7 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
     defaultCwd: expandHome(merged.defaultCwd, home),
     sessionsDir: expandHome(merged.sessionsDir, home),
     leadPane: process.env["DORI_LEAD_PANE"] ?? merged.leadPane,
+    slackNames: envSlackNames(process.env["DORI_SLACK_NAMES"]) ?? merged.slackNames,
   };
 };
 
