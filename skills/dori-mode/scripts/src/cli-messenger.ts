@@ -3,7 +3,6 @@ import { type Command, die, envSlackToken, every, slackAuth } from "./cli-contex
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
-import { ownerSpoke, slackOwnerWhere } from "./messenger/owner-wait.ts";
 import { formatSlackInbound, pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { inboundSink, laneRefusal, nameCaller, runSlackSocket } from "./messenger/slack-socket.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -146,7 +145,6 @@ const slackSocketInbound = async (
   ledger: ThreadLedger,
   minutes: number,
   names: readonly string[],
-  stateDir: string,
 ): Promise<void> => {
   const refusal = laneRefusal(process.env);
   if (refusal) return die(refusal);
@@ -159,13 +157,7 @@ const slackSocketInbound = async (
   if (!appToken) return die("DORI_SLACK_APP_TOKEN_FILE is not set");
   const me = String((await slack.call("auth.test", {}))["user_id"] ?? die("auth.test returned no user_id"));
   const warn = (message: string) => console.log(`WARN ${message}`.slice(0, 300));
-  const owner = process.env["DORI_SLACK_OWNER_ID"] || undefined;
-  if (!owner) warn("DORI_SLACK_OWNER_ID is not set: the supervisor cannot tell when the owner waits on Slack");
-  const emit = inboundSink((i) => {
-    console.log(formatSlackInbound(i));
-    const where = slackOwnerWhere(i, owner);
-    if (where) ownerSpoke(stateDir, where, i.text ?? "");
-  });
+  const emit = inboundSink((i) => console.log(formatSlackInbound(i)));
   const told = new Set<string>();
   const pollWarn = (message: string) => {
     if (!told.has(message)) warn(message);
@@ -201,8 +193,7 @@ const inbound: Command = async ({ key, loopMinutes, config, values }) => {
   const auth = slackAuth(envSlackToken() ?? die(NO_SLACK_TOKEN));
   const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
   const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
-  if (values["socket"] === true)
-    return await slackSocketInbound(slack, ledger, minutes, config.slackNames, config.stateDir);
+  if (values["socket"] === true) return await slackSocketInbound(slack, ledger, minutes, config.slackNames);
   const me = String((await slack.call("auth.test", {}))["user_id"] ?? die("auth.test returned no user_id"));
   console.log("INBOUND_READY slack");
   const told = new Set<string>();
