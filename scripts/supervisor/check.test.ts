@@ -201,6 +201,23 @@ describe("supervisor check", () => {
     expect(nudges()).toBe(3);
   });
 
+  test("a failed hc ls, hc get or ps changes nothing instead of reopening every role", async () => {
+    for (const cmd of ["hc ls", "hc get", "ps"]) {
+      m.failing = new Set([cmd]);
+      expect(await check(m.sys, p)).toBe(1);
+      expect(m.logs.at(-1)).toStartWith("ERR could not read");
+    }
+    expect(m.ran("run")).toEqual([]);
+    expect(m.calls.some((c) => c[1] === "kill")).toBe(false);
+  });
+
+  test("a lock taken over mid-pass is left to its new owner", async () => {
+    const owner = join(home, "supervisor", "lock", "owner");
+    m.onLs = () => writeFileSync(owner, "other-pass");
+    await check(m.sys, p);
+    expect(readFileSync(owner, "utf8")).toBe("other-pass");
+  });
+
   test("a pause file stops every repair", async () => {
     m.terms.delete("t1");
     mkdirSync(join(home, "supervisor"));

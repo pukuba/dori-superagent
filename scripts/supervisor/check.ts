@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
 import { tendListeners } from "./listeners.ts";
@@ -28,6 +28,8 @@ export const BACKOFF_MS = 30 * 60_000;
 /** A restart-host run is in progress while its marker is younger than this; checks leave the sessions alone meanwhile. */
 export const RESTART_WINDOW_MS = 6 * 60_000;
 const LOCK_STALE_MS = 10 * 60_000;
+/** How long (2s steps) the restart job waits for a scheduled pass to release the lock. */
+const LOCK_WAIT_TRIES = 90;
 const NOTE_FRESH_MS = 30 * 60_000;
 /** The same summary line is logged again at most this often. */
 const OK_LOG_EVERY_MS = 60 * 60_000;
@@ -88,11 +90,27 @@ export async function check(
   if (!opts.duringRestart && existsSync(marker) && sys.now() - statSync(marker).mtimeMs < RESTART_WINDOW_MS)
     return said(sys, "RESTARTING host restart in progress, leaving sessions alone", 0);
   const lock = join(supervisorDir(p), "lock");
-  if (!takeLock(lock, sys)) return said(sys, "BUSY another check holds the lock", 0);
+  const token = `${process.pid}-${sys.now()}`;
+  // The restart job waits for a scheduled pass to finish instead of giving up, so its reason reaches the new lead.
+  let held = takeLock(lock, token, sys);
+  for (let i = 0; !held && opts.duringRestart && i < LOCK_WAIT_TRIES; i++) {
+    await sys.sleep(2000);
+    held = takeLock(lock, token, sys);
+  }
+  if (!held) return said(sys, "BUSY another check holds the lock", 0);
   try {
     return await pass(sys, p, opts.reason);
   } finally {
-    rmdirSync(lock);
+    releaseLock(lock, token);
+  }
+}
+
+/** Removes the lock only while it is still this pass's: a pass that outlived LOCK_STALE_MS may have lost it. */
+function releaseLock(lock: string, token: string): void {
+  try {
+    if (readFileSync(join(lock, "owner"), "utf8") === token) rmSync(lock, { recursive: true });
+  } catch {
+    // already taken over or gone: not ours to remove
   }
 }
 
@@ -100,10 +118,11 @@ export async function check(
  * mkdir is the lock. A stale one is moved aside under a unique name (rename is atomic, so two passes cannot both move
  * the same lock) and mkdir is retried; only the pass whose mkdir succeeds proceeds. A lock that vanishes mid-look is retried.
  */
-function takeLock(lock: string, sys: Sys): boolean {
+function takeLock(lock: string, token: string, sys: Sys): boolean {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       mkdirSync(lock);
+      writeFileSync(join(lock, "owner"), token);
       return true;
     } catch {
       let age: number;
@@ -116,7 +135,7 @@ function takeLock(lock: string, sys: Sys): boolean {
       const aside = `${lock}.stale-${process.pid}-${sys.now()}`;
       try {
         renameSync(lock, aside);
-        rmdirSync(aside);
+        rmSync(aside, { recursive: true });
       } catch {
         // another pass moved it first; the next mkdir decides
       }
@@ -151,6 +170,12 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
   const group = groupId(p.home);
   const terms = await groupTerms(sys, group);
   const procs = await processes(sys);
+  if (terms === undefined || procs === undefined)
+    return said(
+      sys,
+      `ERR could not read ${terms === undefined ? "hc terminals" : "the process table"}; changing nothing`,
+      1,
+    );
   const roles = readJson<Record<string, string>>(join(p.home, "roles.json"), {});
   const now = sys.now();
   const actions: string[] = [];

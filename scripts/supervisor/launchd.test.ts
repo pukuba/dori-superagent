@@ -26,6 +26,20 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 describe("restart-host job", () => {
+  test("waits for a scheduled pass to release the lock instead of giving up", async () => {
+    mkdirSync(join(home, "supervisor", "lock"), { recursive: true });
+    writeFileSync(join(home, "supervisor", "lock", "owner"), "scheduled-pass");
+    m.clock = Date.now();
+    m.terms.clear();
+    let sleeps = 0;
+    m.onSleep = () => {
+      if (++sleeps === 3) rmSync(join(home, "supervisor", "lock"), { recursive: true });
+    };
+    expect(await restartRun(m.sys, p, { core: false, delayS: 0 })).toBe(0);
+    expect(m.ran("run").filter((c) => c.includes("dori.role=lead"))).toHaveLength(1);
+    expect(readFileSync(join(home, "supervisor", "handoff-lead.md"), "utf8")).toContain("restarted on purpose");
+  });
+
   test("restart-run stops the holder, waits for the new one, and relaunches the lead once with the restart reason and note", async () => {
     mkdirSync(join(home, "supervisor"));
     writeFileSync(join(home, "supervisor", "restart-note.md"), "grants were changed");

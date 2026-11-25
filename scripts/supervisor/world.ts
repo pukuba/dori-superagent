@@ -46,15 +46,21 @@ export async function hcUp(sys: Sys): Promise<boolean> {
   return (await sys.run(["hc", "server", "status", "--json"])).code === 0;
 }
 
-/** Live local terminals carrying this home's dori.group label, with their root pid and labels. */
-export async function groupTerms(sys: Sys, group: string): Promise<Term[]> {
-  const ls = json((await sys.run(["hc", "ls", "--json"])).out);
-  const rows = Array.isArray(ls["terminals"]) ? (ls["terminals"] as Record<string, unknown>[]) : [];
+/**
+ * Live local terminals carrying this home's dori.group label, with their root pid and labels. undefined when hc could not
+ * say: a failed or garbled `ls` or `get` must never read as "no terminals", or every role would be opened a second time.
+ */
+export async function groupTerms(sys: Sys, group: string): Promise<Term[] | undefined> {
+  const listed = await sys.run(["hc", "ls", "--json"]);
+  const ls = json(listed.out);
+  if (listed.code !== 0 || !Array.isArray(ls["terminals"])) return undefined;
   const out: Term[] = [];
-  for (const row of rows) {
+  for (const row of ls["terminals"] as Record<string, unknown>[]) {
     const address = row["address"];
     if (typeof address !== "string" || address.includes("/") || row["state"] !== "live") continue;
-    const got = json((await sys.run(["hc", "get", address, "--json"])).out);
+    const fetched = await sys.run(["hc", "get", address, "--json"]);
+    if (fetched.code !== 0) return undefined;
+    const got = json(fetched.out);
     const labels = (got["labels"] ?? {}) as Record<string, string>;
     if (labels["dori.group"] === group && typeof got["pid"] === "number")
       out.push({ address, pid: got["pid"], labels });
@@ -62,9 +68,12 @@ export async function groupTerms(sys: Sys, group: string): Promise<Term[]> {
   return out;
 }
 
-export async function processes(sys: Sys): Promise<Proc[]> {
+/** The process table, or undefined when ps failed: an empty table would make every live terminal look agentless. */
+export async function processes(sys: Sys): Promise<Proc[] | undefined> {
+  const ps = await sys.run(["ps", "-axo", "pid=,ppid=,command="]);
+  if (ps.code !== 0) return undefined;
   const out: Proc[] = [];
-  for (const line of (await sys.run(["ps", "-axo", "pid=,ppid=,command="])).out.split("\n")) {
+  for (const line of ps.out.split("\n")) {
     const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     if (m) out.push({ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3]! });
   }

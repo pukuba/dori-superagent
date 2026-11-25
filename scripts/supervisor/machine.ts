@@ -14,13 +14,16 @@ export class Machine {
   /** What `dori send` prints, and whether `hc run` fails. */
   sendReply = { code: 0, out: "DELIVERED lead" };
   runFails = false;
+  failing = new Set<string>();
+  onLs: () => void = () => {};
+  onSleep: () => void = () => {};
   logs: string[] = [];
   clock = 1_000_000;
   next = 100;
   sys: Sys = {
     run: async (argv) => this.run(argv),
     now: () => this.clock,
-    sleep: async () => {},
+    sleep: async () => this.onSleep(),
     log: (l) => void this.logs.push(l),
   };
   constructor(readonly group: string) {}
@@ -38,6 +41,8 @@ export class Machine {
       err: "",
     });
     const [a, b, c] = argv;
+    if (this.failing.has(`${a} ${b}`) || (a === "ps" && this.failing.has("ps")))
+      return { code: 1, out: "", err: "failed" };
     if (a === "ps") return ok(this.procs.map((p) => `${p.pid} ${p.ppid} ${p.cmd}`).join("\n"));
     if (a === "kill" && b === "-0") return { code: this.dead.has(Number(c)) ? 1 : 0, out: "", err: "" };
     if (a === "kill") {
@@ -49,6 +54,7 @@ export class Machine {
     }
     if (a !== "hc") return { ...this.sendReply, err: "" };
     if (b === "server") return ok(this.holder === undefined ? {} : { holder: { pid: this.holder } });
+    if (b === "ls") this.onLs();
     if (b === "ls") return ok({ terminals: [...this.terms.keys()].map((address) => ({ address, state: "live" })) });
     if (b === "get") return ok({ ...this.terms.get(c!), address: c });
     if (b === "kill" || b === "rm") {
