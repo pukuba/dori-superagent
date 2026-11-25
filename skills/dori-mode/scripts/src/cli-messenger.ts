@@ -2,7 +2,7 @@
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { ownerSpoke, slackOwnerLine, telegramOwnerLine, yenaReplied } from "./messenger/owner-wait.ts";
+import { ownerSpoke, ownerWaitDone, slackOwnerLine, telegramOwnerLine, yenaReplied } from "./messenger/owner-wait.ts";
 import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -39,8 +39,10 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     );
     if (ts !== undefined) await slack.edit(to, ts, text);
     else {
-      console.log(`SENT ${(await slack.post(to, text, threadTs)).ts}`);
-      replied(config.stateDir, `slack:${to}`);
+      const posted = await slack.post(to, text, threadTs);
+      console.log(`SENT ${posted.ts}`);
+      // The channel Slack posted in: a DM sent by user id resolves to the D… channel the owner's wait recorded.
+      replied(config.stateDir, `slack:${posted.channel}`);
     }
   } else if (platform === "telegram") {
     // Number("telegram:-1001/42") is NaN, and the Telegram target drops a falsy threadId, so a bad --thread
@@ -71,9 +73,19 @@ const send: Command = async ({ key, need, opt, values, config }) => {
   } else die(`unknown platform ${platform}`);
 };
 
-/** A posted message answers the owner, except the supervisor's own alert (DORI_NOT_A_REPLY=1): that one is not yena. */
+/**
+ * A posted message answers the owner when it went where he wrote, except the supervisor's own alert
+ * (DORI_NOT_A_REPLY=1). The message is already out, so a failure to record it is a WARN, never a failed send.
+ */
 const replied = (stateDir: string, target: string): void => {
-  if (process.env["DORI_NOT_A_REPLY"] !== "1") yenaReplied(stateDir, target);
+  if (process.env["DORI_NOT_A_REPLY"] === "1") return;
+  try {
+    yenaReplied(stateDir, target);
+  } catch (e) {
+    console.log(
+      `WARN could not record the reply for the owner-wait alert: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
 };
 
 const presence: Command = async ({ key }) => {
@@ -184,6 +196,11 @@ const inbound: Command = async ({ key, loopMinutes, config }) => {
 
 export const messengerCommands: Readonly<Record<string, Command>> = {
   send,
+  "owner-wait": async ({ key, config }) => {
+    if (key !== "done") die("owner-wait takes done: the owner's waiting messages need no reply");
+    ownerWaitDone(config.stateDir);
+    console.log("DONE owner-wait");
+  },
   presence,
   inbound,
   transcribe: async ({ key, config }) => {

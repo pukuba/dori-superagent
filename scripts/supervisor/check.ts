@@ -131,7 +131,7 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
   st.streak ??= {};
   const streak = st.streak;
   const group = groupId(p.home);
-  let terms = await groupTerms(sys, group);
+  const terms = await groupTerms(sys, group);
   const procs = await processes(sys);
   if (terms === undefined || procs === undefined)
     return said(
@@ -142,15 +142,7 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
   const roles = readJson<Record<string, string>>(join(p.home, "roles.json"), {});
   const now = sys.now();
   const liveLead = terms.find((t) => t.labels["dori.role"] === "lead" && alive(t, "lead", procs, p));
-  const owner = await watchOwner(sys, p, st, liveLead, now);
-  const actions: string[] = [...owner.actions];
-  if (owner.stuck && liveLead) {
-    // Closed here so the loop below relaunches it the usual way, with why it was replaced in the handoff.
-    await close(sys, liveLead.address);
-    terms = terms.filter((t) => t.address !== liveLead.address);
-    reason = reason ? `${reason}; ${owner.stuck}` : owner.stuck;
-    actions.push(`CLOSE stuck lead hc:${liveLead.address} (${owner.stuck})`);
-  }
+  const actions: string[] = await watchOwner(sys, p, st, liveLead, now);
   let lead: Term | undefined;
   // Terminals seen alive by an earlier pass, or opened by this supervisor: only those are ever replaced when agentless.
   const seen = new Set((st.seen ?? []).filter((a) => terms.some((t) => t.address === a)));

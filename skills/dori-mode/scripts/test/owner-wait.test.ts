@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { ownerSpoke, slackOwnerLine, telegramOwnerLine, yenaReplied } from "../src/messenger/owner-wait.ts";
+import {
+  ownerSpoke,
+  ownerWaitDone,
+  slackOwnerLine,
+  telegramOwnerLine,
+  yenaReplied,
+} from "../src/messenger/owner-wait.ts";
 import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
 
@@ -31,7 +37,7 @@ test("the oldest unanswered message starts the wait; targets and the last 10 tex
   }
 });
 
-test("only a post where the owner wrote ends the wait; a post anywhere else leaves it open", () => {
+test("only a post where the owner wrote, or owner-wait done, ends the wait; a post anywhere else leaves it open", () => {
   const state = withState();
   try {
     ownerSpoke(state.dir, slackC1, "hi?", 1000);
@@ -42,6 +48,8 @@ test("only a post where the owner wrote ends the wait; a post anywhere else leav
     expect(wait(state.dir)).toEqual({ repliedAt: 3000 });
     ownerSpoke(state.dir, tgDm, "again", 4000);
     expect(wait(state.dir)).toMatchObject({ since: 4000, targets: ["telegram:7"] });
+    ownerWaitDone(state.dir, 5000);
+    expect(wait(state.dir)).toEqual({ repliedAt: 5000 });
   } finally {
     state.done();
   }
@@ -74,18 +82,19 @@ test("only the configured owner's Slack lines and the owner's new Telegram DMs c
   expect(telegramOwnerLine({ ...tg, from: 8 }, 7)).toBeUndefined();
 });
 
-test("send telegram to the owner's chat ends his wait; another chat or the supervisor's alert does not", async () => {
+test("a send to where the owner wrote ends his wait (Slack by the channel it landed in); elsewhere or the alert does not", async () => {
   const state = withState();
   try {
     const config = join(state.dir, "config.json");
     writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, hooks: {} }));
-    const send = (to: string, ...env: string[]) =>
+    const send = (platform: string, to: string, ...env: string[]) =>
       run(
         [
           "env",
           `DORI_CONFIG=${config}`,
           `DORI_STATE_DIR=${state.dir}`,
           "DORI_TELEGRAM_TOKEN=123:not-a-real-token",
+          "DORI_SLACK_TOKEN=xoxb-not-a-real-token",
           `DORI_TEST_FETCH_LOG=${join(state.dir, "fetch.jsonl")}`,
           ...env,
           process.execPath,
@@ -93,7 +102,7 @@ test("send telegram to the owner's chat ends his wait; another chat or the super
           join(import.meta.dir, "record-fetch.ts"),
           join(import.meta.dir, "../src/cli.ts"),
           "send",
-          "telegram",
+          platform,
           "--to",
           to,
           "--text",
@@ -102,11 +111,52 @@ test("send telegram to the owner's chat ends his wait; another chat or the super
         { timeoutMs: 20_000 },
       );
     ownerSpoke(state.dir, tgDm, "hi?", 1000);
-    expect((await send("7", "DORI_NOT_A_REPLY=1")).code).toBe(0);
-    expect((await send("8")).code).toBe(0);
+    expect((await send("telegram", "7", "DORI_NOT_A_REPLY=1")).code).toBe(0);
+    expect((await send("telegram", "8")).code).toBe(0);
     expect(wait(state.dir)["since"]).toBe(1000);
-    expect((await send("7")).code).toBe(0);
+    expect((await send("telegram", "7")).code).toBe(0);
     expect(wait(state.dir)["since"]).toBeUndefined();
+    // Slack: the owner wrote in his DM (D0WNER); a reply sent to his user id lands there and ends the wait.
+    ownerSpoke(state.dir, { where: "Slack D0WNER", target: "slack:D0WNER" }, "hi?", 2000);
+    expect((await send("slack", "C-OTHER")).code).toBe(0);
+    expect(wait(state.dir)["since"]).toBe(2000);
+    expect((await send("slack", "U0WNER")).code).toBe(0);
+    expect(wait(state.dir)["since"]).toBeUndefined();
+  } finally {
+    state.done();
+  }
+});
+
+test("a send whose reply cannot be recorded still succeeds, with a WARN", async () => {
+  const state = withState();
+  try {
+    const config = join(state.dir, "config.json");
+    writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, hooks: {} }));
+    const blocked = join(state.dir, "blocked");
+    writeFileSync(blocked, "a file where the state dir should be");
+    const r = await run(
+      [
+        "env",
+        `DORI_CONFIG=${config}`,
+        `DORI_STATE_DIR=${blocked}`,
+        "DORI_TELEGRAM_TOKEN=123:not-a-real-token",
+        `DORI_TEST_FETCH_LOG=${join(state.dir, "fetch.jsonl")}`,
+        process.execPath,
+        "--preload",
+        join(import.meta.dir, "record-fetch.ts"),
+        join(import.meta.dir, "../src/cli.ts"),
+        "send",
+        "telegram",
+        "--to",
+        "7",
+        "--text",
+        "hi",
+      ],
+      { timeoutMs: 20_000 },
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SENT 99");
+    expect(r.out).toContain("WARN could not record the reply");
   } finally {
     state.done();
   }

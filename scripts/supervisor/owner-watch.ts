@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { alertOwner } from "./handoff.ts";
@@ -10,9 +9,7 @@ import type { Term } from "./world.ts";
 export const OWNER_WAIT_MS = 10 * 60_000;
 /** At most one such alert this often, however many waits start and end in between. */
 export const ALERT_GAP_MS = 30 * 60_000;
-/** A lead is relaunched only when its screen stayed the same this long, on top of OWNER_WAIT_MS, with no limit shown. */
-export const STUCK_MS = 20 * 60_000;
-/** A replay that failed under a limit that came back is repeated, but never sooner than this after the last one. */
+/** Replays are never sent closer together than this: not after one whose turn hit the limit again, nor after a HELD one. */
 export const REPLAY_GAP_MS = 5 * 60_000;
 /**
  * The provider's own limit error (as on 2026-11-25: "You've hit your org's monthly spend limit … (rate_limit)"), looked
@@ -62,7 +59,8 @@ type Watch = NonNullable<State["owner"]>;
 /**
  * The limit is no longer on the lead's screen but the owner still waits: the turns that failed under it consumed his
  * messages, so they go back into the lead's inbox. If the limit shows again afterwards (the replayed turn failed too),
- * the next clear replays again; DELIVERED or QUEUED counts as sent, anything else is retried on the next pass.
+ * the next clear replays again. DELIVERED or QUEUED counts as sent; HELD may have arrived, so like a failure it is only
+ * retried after REPLAY_GAP_MS, which bounds a possible duplicate to one per gap.
  */
 async function replay(sys: Sys, p: Paths, o: Watch, w: OwnerWait, since: number, now: number): Promise<string> {
   const lines = (w.messages ?? []).map(
@@ -72,6 +70,7 @@ async function replay(sys: Sys, p: Paths, o: Watch, w: OwnerWait, since: number,
   const r = await sys.run([p.bun, join(p.repo, "src", "cli.ts"), "send", "lead", "--text", text], {
     DORI_HOME: p.home,
   });
+  o.replayTriedAt = now;
   const reply = `${r.out}\n${r.err}`;
   if (!/^(DELIVERED|QUEUED) /m.test(reply))
     return `WARN replay of missed owner messages failed (exit ${r.code}): ${reply.trim().split("\n")[0] ?? ""}`;
@@ -83,8 +82,8 @@ async function replay(sys: Sys, p: Paths, o: Watch, w: OwnerWait, since: number,
 /**
  * The owner wrote (Slack or Telegram) and yena has not answered where he wrote. While the wait is open the lead's screen
  * is read every pass: a provider limit on it is remembered, and once it is gone the missed messages are replayed. Past
- * OWNER_WAIT_MS the owner hears it on Telegram, rate-limited. `stuck` is set, once per wait, when the live lead's screen
- * has not changed for STUCK_MS and shows no limit: the caller replaces that lead. A lead under a limit is never replaced.
+ * OWNER_WAIT_MS the owner hears it on Telegram, rate-limited. The lead is never relaunched from here: an idle lead and a
+ * wedged one look alike on screen, so replacing it is left to the owner.
  */
 export async function watchOwner(
   sys: Sys,
@@ -92,42 +91,31 @@ export async function watchOwner(
   st: State,
   lead: Term | undefined,
   now: number,
-): Promise<{ actions: string[]; stuck?: string }> {
+): Promise<string[]> {
   const w = readJson<OwnerWait>(join(stateDirOf(sys.env), "owner-wait.json"), {});
+  if (w.since === undefined) return [];
   st.owner ??= {};
   const o = st.owner;
-  if (w.since === undefined) {
-    delete o.screen;
-    delete o.screenSince;
-    return { actions: [] };
-  }
   const since = w.since;
   const waited = now - since;
   const where = w.where ?? "a messenger";
   const screen = lead ? await screenOf(sys, lead.address) : undefined;
   const limited = screen !== undefined && limitShown(screen);
-  if (screen !== undefined) {
-    const hash = createHash("sha256").update(screen).digest("hex");
-    if (hash !== o.screen) {
-      o.screen = hash;
-      o.screenSince = now;
-    }
-  }
   const actions: string[] = [];
   if (limited) {
     o.limitedFor = since;
     o.limitAt = now;
   } else if (lead && screen !== undefined && o.limitedFor === since) {
-    const again =
-      o.replayedFor !== since || ((o.limitAt ?? 0) > (o.replayAt ?? 0) && now - (o.replayAt ?? 0) >= REPLAY_GAP_MS);
-    if (again) actions.push(await replay(sys, p, o, w, since, now));
+    const due = o.replayTriedAt === undefined || now - o.replayTriedAt >= REPLAY_GAP_MS;
+    const owed = o.replayedFor !== since || (o.limitAt ?? 0) > (o.replayAt ?? 0);
+    if (due && owed) actions.push(await replay(sys, p, o, w, since, now));
   }
-  if (waited < OWNER_WAIT_MS) return { actions };
+  if (waited < OWNER_WAIT_MS) return actions;
   actions.unshift(`WARN the owner has waited on yena since ${new Date(since).toISOString()} (${where})`);
   if (o.alertedFor !== since && (o.alertAt === undefined || now - o.alertAt >= ALERT_GAP_MS)) {
     const why = limited
-      ? " 예나 화면에 사용량/요청 한도(rate limit) 메시지가 떠 있어서, 한도가 풀릴 때까지는 대답을 못 할 수 있어."
-      : " 계속 화면이 멈춰 있으면 supervisor가 예나 세션을 새로 띄워볼게.";
+      ? " 예나 화면에 사용량/요청 한도(rate limit) 메시지가 떠 있어서, 한도가 풀릴 때까지는 대답을 못 할 수 있어. 풀리면 놓친 메시지를 다시 넘겨줄게."
+      : " 세션은 살아 있는데 대답이 없어. 확인이 필요하면 Slack이나 터미널에서 예나를 봐줘.";
     const text = `[dori supervisor] 예나가 대답을 안 하고 있어. 오빠가 ${where}에 보낸 메시지에 ${minutes(waited)}분째 답이 없어.${why} 로그: ~/Library/Logs/dori-supervisor.log`;
     const result = await alertOwner(sys, p, text);
     if (result.startsWith("alerted")) {
@@ -138,12 +126,5 @@ export async function watchOwner(
       `ALERT owner unanswered for ${minutes(waited)}m${limited ? " (lead shows a provider limit)" : ""}: ${result}`,
     );
   }
-  const still = screen !== undefined && o.screenSince !== undefined ? now - o.screenSince : 0;
-  const frozen = waited >= OWNER_WAIT_MS + STUCK_MS && still >= STUCK_MS;
-  if (!lead || limited || o.relaunchedFor === since || !frozen) return { actions };
-  o.relaunchedFor = since;
-  return {
-    actions,
-    stuck: `the owner waited ${minutes(waited)} minutes for a reply (${where}) while the lead's screen did not change for ${minutes(still)} minutes`,
-  };
+  return actions;
 }

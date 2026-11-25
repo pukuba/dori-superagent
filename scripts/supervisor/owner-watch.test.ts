@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
 import { check } from "./check.ts";
 import { healthy, Machine } from "./machine.ts";
-import { ALERT_GAP_MS, OWNER_WAIT_MS, REPLAY_GAP_MS, STUCK_MS } from "./owner-watch.ts";
+import { ALERT_GAP_MS, OWNER_WAIT_MS, REPLAY_GAP_MS } from "./owner-watch.ts";
 import type { Paths } from "./sys.ts";
 
 let home: string;
@@ -102,43 +102,26 @@ describe("owner waiting on yena", () => {
     ownerWaiting(OWNER_WAIT_MS);
     await pass(`some output\n${LIMIT_LINE}\n> `);
     expect(alertText()).toContain("rate limit");
-    m.clock += STUCK_MS;
+    m.clock += 60 * MIN;
     await pass();
     expect(leadRuns()).toEqual([]);
     expect(m.ran("kill").some((c) => c[2] === "t1")).toBe(false);
   });
 
-  test("'rate limit' in ordinary output, or a limit error scrolled far up, does not shield a frozen lead", async () => {
+  test("'rate limit' in ordinary output, or a limit error scrolled far up, is not a limit", async () => {
     const filler = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
     ownerWaiting(OWNER_WAIT_MS);
-    await pass(`${LIMIT_LINE}\n${filler}\nhandle the rate limit and quota (429) in retry.ts\n> `, STUCK_MS + MIN);
-    await pass();
-    expect(m.ran("kill").some((c) => c[2] === "t1")).toBe(true);
-    expect(leadRuns()).toHaveLength(1);
+    await pass(`${LIMIT_LINE}\n${filler}\nhandle the rate limit and quota (429) in retry.ts\n> `);
+    await pass("> idle");
+    expect(alertText()).not.toContain("rate limit");
     expect(replays()).toEqual([]);
   });
 
-  test("a lead whose screen stays frozen while the owner waits is replaced once, with why in its handoff", async () => {
+  test("a lead idle at its prompt for an hour is alerted about once and never killed or relaunched", async () => {
     ownerWaiting(OWNER_WAIT_MS);
-    await check(m.sys, p);
-    m.clock += STUCK_MS - 1;
-    await check(m.sys, p);
-    expect(leadRuns()).toEqual([]);
-    m.clock += 1;
-    await check(m.sys, p);
-    expect(m.ran("kill").some((c) => c[2] === "t1")).toBe(true);
-    expect(leadRuns()).toHaveLength(1);
-    expect(readFileSync(join(home, "supervisor", "handoff-lead.md"), "utf8")).toContain("the owner waited");
-    const lead = [...m.terms.entries()].find(([, t]) => t.labels["dori.role"] === "lead")!;
-    m.procs.push({ pid: lead[1].pid + 1, ppid: lead[1].pid, cmd: "/bun /x/senpi/dist/bundle/cli.js" });
-    m.clock += STUCK_MS * 2;
-    await check(m.sys, p);
-    expect(leadRuns()).toHaveLength(1);
-  });
-
-  test("a lead whose screen keeps changing is left alone", async () => {
-    ownerWaiting(OWNER_WAIT_MS);
-    for (let i = 0; i < 5; i++) await pass(`working ${i}m`, STUCK_MS / 2);
+    for (let i = 0; i < 6; i++) await pass("> ", 10 * MIN);
+    expect(alerts()).toHaveLength(1);
+    expect(m.calls.some((c) => c[1] === "kill")).toBe(false);
     expect(leadRuns()).toEqual([]);
   });
 
@@ -150,6 +133,9 @@ describe("owner waiting on yena", () => {
     await pass("> idle");
     expect(replays()).toHaveLength(1);
     m.sendReply = { code: 0, out: "DELIVERED lead" };
+    await pass("> idle");
+    expect(replays()).toHaveLength(1); // a HELD one may have arrived: no resend inside REPLAY_GAP_MS
+    m.clock += REPLAY_GAP_MS;
     await pass("> idle");
     expect(replays()).toHaveLength(2);
     const text = replays()[1]!.at(-1)!;

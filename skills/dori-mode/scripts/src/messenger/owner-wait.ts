@@ -86,6 +86,10 @@ export const yenaReplied = (stateDir: string, target: string, now: number = Date
     w.since === undefined || (w.targets ?? []).includes(target) ? { repliedAt: now } : undefined,
   );
 
+/** The lead decided the owner's messages need no reply (an "ok", a thanks): the wait ends without a post. */
+export const ownerWaitDone = (stateDir: string, now: number = Date.now()): void =>
+  locked(fileOf(stateDir), () => ({ repliedAt: now }));
+
 /** A Slack line from the owner, or undefined when it is not his (or no owner id is configured). */
 export const slackOwnerLine = (i: Inbound, ownerId: string | undefined): OwnerLine | undefined =>
   ownerId && i.user === ownerId && i.source !== "unread"
