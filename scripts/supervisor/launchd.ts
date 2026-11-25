@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { check, restartMarker } from "./check.ts";
+import { check, restartMarker, restartNote } from "./check.ts";
 import type { Paths, Sys } from "./sys.ts";
 
 export const SUPERVISOR_LABEL = "dev.dori.supervisor";
@@ -79,7 +79,7 @@ export async function scheduleRestart(
   o: { core: boolean; delayS: number; note?: string },
 ): Promise<number> {
   mkdirSync(join(p.home, "supervisor"), { recursive: true });
-  if (o.note) writeFileSync(join(p.home, "restart-handoff.md"), `${o.note}\n`);
+  if (o.note) writeFileSync(restartNote(p), `${o.note}\n`);
   const file = join(p.home, "supervisor", `${RESTART_LABEL}.plist`);
   const args = ["restart-run", "--delay", String(o.delayS), ...(o.core ? ["--core"] : [])];
   writeFileSync(file, plist(p, RESTART_LABEL, args, "<key>RunAtLoad</key><true/>", logFile("dori-restart-host.log")));

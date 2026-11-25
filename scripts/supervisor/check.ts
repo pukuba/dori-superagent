@@ -39,6 +39,9 @@ type State = {
 const dir = (p: Paths): string => join(p.home, "supervisor");
 export const restartMarker = (p: Paths): string => join(dir(p), "restarting");
 export const pauseFile = (p: Paths): string => join(dir(p), "paused");
+/** What restart-host was asked to pass on; used once, and only while it is this fresh. */
+export const restartNote = (p: Paths): string => join(dir(p), "restart-note.md");
+const NOTE_FRESH_MS = 30 * 60_000;
 
 const said = (sys: Sys, line: string, code: number): number => {
   sys.log(line);
@@ -62,9 +65,10 @@ function setRole(p: Paths, role: Role, address: string): void {
 }
 
 function writeHandoff(p: Paths, why: string, sys: Sys): void {
-  const note = join(p.home, "restart-handoff.md");
-  const extra = existsSync(note) ? readFileSync(note, "utf8").trim() : "";
-  if (extra) renameSync(note, `${note}.used`);
+  const note = restartNote(p);
+  const fresh = existsSync(note) && sys.now() - statSync(note).mtimeMs < NOTE_FRESH_MS;
+  const extra = fresh ? readFileSync(note, "utf8").trim() : "";
+  if (existsSync(note)) renameSync(note, `${note}.used`);
   const monitors = listeners(p)
     .map(
       (l, i) =>

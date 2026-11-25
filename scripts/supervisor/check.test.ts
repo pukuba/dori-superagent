@@ -124,6 +124,11 @@ describe("supervisor check", () => {
   test("missing listeners make one nudge to the lead per cooldown; orphans outside the group are stopped", async () => {
     writeFileSync(join(home, "telegram.env"), "");
     m.procs.push({ pid: 500, ppid: 1, cmd: "bun src/cli.ts inbound telegram --loop 1" });
+    m.procs.push({
+      pid: 499,
+      ppid: 1,
+      cmd: "/bin/bash -c . telegram.env; cd x && bun src/cli.ts inbound telegram --loop 1",
+    });
     await check(m.sys, p);
     expect(m.calls).toContainEqual(["kill", "500"]);
     const nudges = () => m.calls.filter((c) => c.includes("send") && c.includes("lead"));
@@ -137,6 +142,25 @@ describe("supervisor check", () => {
     m.clock += GRACE_MS;
     await check(m.sys, p);
     expect(nudges()).toHaveLength(1);
+  });
+
+  test("an agent whose prompt quotes a listener command is not a listener; a stale restart note is not passed on", async () => {
+    writeFileSync(join(home, "telegram.env"), "");
+    mkdirSync(join(home, "supervisor"));
+    writeFileSync(join(home, "supervisor", "restart-note.md"), "old note");
+    m.clock = Date.now() + 31 * 60_000;
+    m.terms.delete("t1");
+    await check(m.sys, p);
+    expect(readFileSync(join(home, "supervisor", "handoff-lead.md"), "utf8")).not.toContain("old note");
+    const lead = [...m.terms.entries()].find(([, t]) => t.labels["dori.role"] === "lead")!;
+    m.procs.push({
+      pid: lead[1].pid + 1,
+      ppid: lead[1].pid,
+      cmd: `${AGENT} "... bun src/cli.ts inbound telegram --loop 1 ..."`,
+    });
+    m.clock += GRACE_MS + 1;
+    await check(m.sys, p);
+    expect(m.calls.filter((c) => c.includes("send") && c.includes("lead"))).toHaveLength(1);
   });
 
   test("a pause file stops every repair", async () => {

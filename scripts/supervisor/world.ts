@@ -96,7 +96,8 @@ export function listeners(p: Paths): Listener[] {
     .filter((s) => existsSync(join(p.home, `${s.kind}.env`)))
     .map((s) => ({
       kind: s.kind,
-      match: new RegExp(`cli\\.ts ${s.args.split(" ").slice(0, 2).join(" ")}\\b`),
+      // Anchored on the listener program itself: an agent whose prompt quotes this command must not count as one.
+      match: new RegExp(`^\\S*bun src/cli\\.ts ${s.args.split(" ").slice(0, 2).join(" ")}\\b`),
       command: `. ${shq(join(p.home, `${s.kind}.env`))}; cd ${shq(dir)} && bun src/cli.ts ${s.args}`,
     }));
 }
