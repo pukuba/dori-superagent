@@ -20,7 +20,9 @@ export type State = {
     alertAt?: number;
     relaunchedFor?: number;
     limitedFor?: number;
+    limitAt?: number;
     replayedFor?: number;
+    replayAt?: number;
     screen?: string;
     screenSince?: number;
   };

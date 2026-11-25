@@ -1,22 +1,26 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Inbound } from "./slack-inbound.ts";
 import type { TgInbound } from "./telegram-inbound.ts";
 
 /**
- * `<stateDir>/owner-wait.json`: since when the owner's oldest unanswered message has waited, and where it was sent. The
- * inbound listeners start the wait, `dori send` ends it, and the supervisor alerts the owner when it runs too long.
+ * `<stateDir>/owner-wait.json`: since when the owner's oldest unanswered message has waited, where he wrote (`targets`,
+ * e.g. `slack:C1` or `telegram:7`), and what he wrote. The inbound listeners start the wait, a `dori send` to one of
+ * those targets ends it, and the supervisor alerts the owner when it runs too long.
  */
 type Said = { readonly at: number; readonly where: string; readonly text: string };
 type OwnerWait = {
   readonly since?: number;
   readonly where?: string;
-  /** What the owner wrote during this wait (the last KEEP messages), for the supervisor to replay after a limit. */
+  readonly targets?: readonly string[];
   readonly messages?: readonly Said[];
   readonly repliedAt?: number;
 };
+export type OwnerLine = { readonly where: string; readonly target: string };
 
 const KEEP = 10;
+const LOCK_STALE_MS = 10_000;
+const LOCK_TRIES = 200;
 
 const fileOf = (stateDir: string): string => join(stateDir, "owner-wait.json");
 
@@ -29,30 +33,67 @@ const load = (file: string): OwnerWait => {
 };
 
 const save = (file: string, w: OwnerWait): void => {
-  mkdirSync(dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(w));
   renameSync(tmp, file);
 };
 
-/** The owner wrote: a wait starts unless one is running (the oldest unanswered message counts), and the text is kept. */
-export const ownerSpoke = (stateDir: string, where: string, text: string, now: number = Date.now()): void => {
-  const file = fileOf(stateDir);
-  const w = load(file);
-  const messages = [...(w.since === undefined ? [] : (w.messages ?? [])), { at: now, where, text: text.slice(0, 500) }];
-  save(file, { since: w.since ?? now, where: w.where ?? where, messages: messages.slice(-KEEP) });
+/** Two listeners and every `dori send` write this file: each read-modify-write holds a mkdir lock (stale after 10s). */
+const locked = (file: string, change: (w: OwnerWait) => OwnerWait | undefined): void => {
+  mkdirSync(dirname(file), { recursive: true });
+  const lock = `${file}.lock`;
+  for (let i = 0; ; i++) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch {
+      let age = 0;
+      try {
+        age = Date.now() - statSync(lock).mtimeMs;
+      } catch {
+        continue; // released between our mkdir and stat: try again at once
+      }
+      if (age > LOCK_STALE_MS) rmSync(lock, { recursive: true, force: true });
+      else if (i >= LOCK_TRIES) throw new Error(`${lock} is held by another writer`);
+      else Bun.sleepSync(10);
+    }
+  }
+  try {
+    const next = change(load(file));
+    if (next) save(file, next);
+  } finally {
+    rmSync(lock, { recursive: true, force: true });
+  }
 };
 
-/** yena posted a message: whatever the owner was waiting on has an answer. */
-export const yenaReplied = (stateDir: string, now: number = Date.now()): void =>
-  save(fileOf(stateDir), { repliedAt: now });
+/** The owner wrote: a wait starts unless one is running (the oldest unanswered message counts); target and text are kept. */
+export const ownerSpoke = (stateDir: string, line: OwnerLine, text: string, now: number = Date.now()): void =>
+  locked(fileOf(stateDir), (w) => {
+    const open = w.since !== undefined;
+    const targets = new Set([...(open ? (w.targets ?? []) : []), line.target]);
+    const said = { at: now, where: line.where, text: text.slice(0, 500) };
+    return {
+      since: w.since ?? now,
+      where: w.where ?? line.where,
+      targets: [...targets],
+      messages: [...(open ? (w.messages ?? []) : []), said].slice(-KEEP),
+    };
+  });
 
-/** Where a Slack line from the owner was sent, or undefined when it is not the owner's (or no owner id is configured). */
-export const slackOwnerWhere = (i: Inbound, ownerId: string | undefined): string | undefined =>
+/** yena posted to `target`: the wait ends only when that is where the owner wrote; a post anywhere else leaves it open. */
+export const yenaReplied = (stateDir: string, target: string, now: number = Date.now()): void =>
+  locked(fileOf(stateDir), (w) =>
+    w.since === undefined || (w.targets ?? []).includes(target) ? { repliedAt: now } : undefined,
+  );
+
+/** A Slack line from the owner, or undefined when it is not his (or no owner id is configured). */
+export const slackOwnerLine = (i: Inbound, ownerId: string | undefined): OwnerLine | undefined =>
   ownerId && i.user === ownerId && i.source !== "unread"
-    ? `Slack ${i.channel}${i.threadTs ? ` thread ${i.threadTs}` : ""}`
+    ? { where: `Slack ${i.channel}${i.threadTs ? ` thread ${i.threadTs}` : ""}`, target: `slack:${i.channel}` }
     : undefined;
 
 /** A new Telegram DM from the owner; edits and group topics do not start a wait. */
-export const telegramOwnerWhere = (i: TgInbound, ownerId: number): string | undefined =>
-  i.kind === "message" && i.source === "dm" && i.from === ownerId ? "Telegram DM" : undefined;
+export const telegramOwnerLine = (i: TgInbound, ownerId: number): OwnerLine | undefined =>
+  i.kind === "message" && i.source === "dm" && i.from === ownerId
+    ? { where: "Telegram DM", target: `telegram:${i.chat}` }
+    : undefined;

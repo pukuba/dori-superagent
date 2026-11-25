@@ -2,7 +2,7 @@
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { ownerSpoke, slackOwnerWhere, telegramOwnerWhere, yenaReplied } from "./messenger/owner-wait.ts";
+import { ownerSpoke, slackOwnerLine, telegramOwnerLine, yenaReplied } from "./messenger/owner-wait.ts";
 import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -40,7 +40,7 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     if (ts !== undefined) await slack.edit(to, ts, text);
     else {
       console.log(`SENT ${(await slack.post(to, text, threadTs)).ts}`);
-      replied(config.stateDir);
+      replied(config.stateDir, `slack:${to}`);
     }
   } else if (platform === "telegram") {
     // Number("telegram:-1001/42") is NaN, and the Telegram target drops a falsy threadId, so a bad --thread
@@ -60,7 +60,7 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     if (messageId !== undefined) await tg.edit(target, messageId, text);
     else {
       console.log(`SENT ${await tg.send(target, text)}`);
-      replied(config.stateDir);
+      replied(config.stateDir, `telegram:${to}`);
     }
   } else if (platform === "discord") {
     const messageId = present("edit");
@@ -72,8 +72,8 @@ const send: Command = async ({ key, need, opt, values, config }) => {
 };
 
 /** A posted message answers the owner, except the supervisor's own alert (DORI_NOT_A_REPLY=1): that one is not yena. */
-const replied = (stateDir: string): void => {
-  if (process.env["DORI_NOT_A_REPLY"] !== "1") yenaReplied(stateDir);
+const replied = (stateDir: string, target: string): void => {
+  if (process.env["DORI_NOT_A_REPLY"] !== "1") yenaReplied(stateDir, target);
 };
 
 const presence: Command = async ({ key }) => {
@@ -147,8 +147,8 @@ const telegramInbound = async (stateDir: string, minutes: number): Promise<void>
     minutes,
     (i) => {
       console.log(formatTelegramInbound(i));
-      const where = telegramOwnerWhere(i, ownerId);
-      if (where) ownerSpoke(stateDir, where, i.text ?? (i.media ? `[${i.media.kind}]` : ""));
+      const line = telegramOwnerLine(i, ownerId);
+      if (line) ownerSpoke(stateDir, line, i.text ?? (i.media ? `[${i.media.kind}]` : ""));
     },
     (m) => console.log(`WARN ${m}`.slice(0, 300)),
   );
@@ -176,8 +176,8 @@ const inbound: Command = async ({ key, loopMinutes, config }) => {
       console.log(
         `INBOUND ${i.source} ${i.channel} ${i.threadTs ?? "-"} ${i.ts || "-"} ${i.user ?? "-"} ${JSON.stringify((i.text ?? "").slice(0, 200))}`,
       );
-      const where = slackOwnerWhere(i, owner);
-      if (where) ownerSpoke(config.stateDir, where, i.text ?? "");
+      const line = slackOwnerLine(i, owner);
+      if (line) ownerSpoke(config.stateDir, line, i.text ?? "");
     }
   });
 };

@@ -5,13 +5,15 @@ import { join, resolve } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
 import { check } from "./check.ts";
 import { healthy, Machine } from "./machine.ts";
-import { ALERT_GAP_MS, OWNER_WAIT_MS, STUCK_MS } from "./owner-watch.ts";
+import { ALERT_GAP_MS, OWNER_WAIT_MS, REPLAY_GAP_MS, STUCK_MS } from "./owner-watch.ts";
 import type { Paths } from "./sys.ts";
 
 let home: string;
 let p: Paths;
 let m: Machine;
 const MIN = 60_000;
+const LIMIT_LINE =
+  "Error: You've hit your org's monthly spend limit · run /usage-credits to ask your admin for a higher limit · your session limit resets 12:30am (Asia/Seoul) (rate_limit)";
 
 /** The owner's message arrived `ago` ms before the machine's clock; undefined `ago` means yena has replied. */
 const ownerWaiting = (ago: number | undefined, where = "Slack C1 thread 1.2") => {
@@ -25,6 +27,12 @@ const ownerWaiting = (ago: number | undefined, where = "Slack C1 thread 1.2") =>
 const alerts = () => m.calls.filter((c) => c[0] === "/bin/bash");
 const alertText = () => readFileSync(join(home, "supervisor", "alert.txt"), "utf8");
 const leadRuns = () => m.ran("run").filter((c) => c.includes("dori.role=lead"));
+const replays = () => m.calls.filter((c) => c.includes("send") && (c.at(-1) ?? "").startsWith("[missed during limit]"));
+const pass = async (screen?: string, step = MIN) => {
+  if (screen !== undefined) m.screens.set("t1", screen);
+  await check(m.sys, p);
+  m.clock += step;
+};
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "dori-owner-"));
@@ -37,6 +45,7 @@ beforeEach(() => {
     doriCmd: "DORI_HOME=h bun cli.ts",
   };
   m = new Machine(groupId(home));
+  m.sys = { ...m.sys, env: { ...m.sys.env, DORI_STATE_DIR: join(home, "state") } };
   healthy(m);
   m.screens.set("t1", "Thought: 1s\n> waiting");
   writeFileSync(join(home, "telegram.env"), "");
@@ -64,6 +73,15 @@ describe("owner waiting on yena", () => {
     expect(m.logs.join("\n")).toContain("WARN the owner has waited on yena");
   });
 
+  test("the wait file is found where the CLI keeps it: DORI_CONFIG's stateDir", async () => {
+    const config = join(home, "cfg.json");
+    writeFileSync(config, JSON.stringify({ stateDir: join(home, "state") }));
+    m.sys = { ...m.sys, env: { DORI_RUNTIME: "hc", DORI_CONFIG: config, HOME: join(home, "nohome") } };
+    ownerWaiting(OWNER_WAIT_MS);
+    await check(m.sys, p);
+    expect(alerts()).toHaveLength(1);
+  });
+
   test("a reply ends the wait; a later wait is alerted only after the rate-limit gap", async () => {
     ownerWaiting(OWNER_WAIT_MS);
     await check(m.sys, p);
@@ -80,15 +98,24 @@ describe("owner waiting on yena", () => {
     expect(alerts()).toHaveLength(2);
   });
 
-  test("a lead whose screen shows a provider limit is reported and never relaunched", async () => {
-    m.screens.set("t1", "Error: You've hit your org's monthly spend limit (rate_limit)");
+  test("a lead whose screen ends in the provider's limit error is reported and never relaunched", async () => {
     ownerWaiting(OWNER_WAIT_MS);
-    await check(m.sys, p);
+    await pass(`some output\n${LIMIT_LINE}\n> `);
     expect(alertText()).toContain("rate limit");
-    m.clock += STUCK_MS + MIN;
-    await check(m.sys, p);
+    m.clock += STUCK_MS;
+    await pass();
     expect(leadRuns()).toEqual([]);
     expect(m.ran("kill").some((c) => c[2] === "t1")).toBe(false);
+  });
+
+  test("'rate limit' in ordinary output, or a limit error scrolled far up, does not shield a frozen lead", async () => {
+    const filler = Array.from({ length: 30 }, (_, i) => `line ${i}`).join("\n");
+    ownerWaiting(OWNER_WAIT_MS);
+    await pass(`${LIMIT_LINE}\n${filler}\nhandle the rate limit and quota (429) in retry.ts\n> `, STUCK_MS + MIN);
+    await pass();
+    expect(m.ran("kill").some((c) => c[2] === "t1")).toBe(true);
+    expect(leadRuns()).toHaveLength(1);
+    expect(replays()).toEqual([]);
   });
 
   test("a lead whose screen stays frozen while the owner waits is replaced once, with why in its handoff", async () => {
@@ -109,50 +136,54 @@ describe("owner waiting on yena", () => {
     expect(leadRuns()).toHaveLength(1);
   });
 
-  test("once the limit clears, the missed owner messages go back to the lead once, with the prefix", async () => {
-    const replays = () =>
-      m.calls.filter((c) => c.includes("send") && (c.at(-1) ?? "").startsWith("[missed during limit]"));
-    m.screens.set("t1", "Error: You've hit your org's monthly spend limit (rate_limit)");
+  test("a lead whose screen keeps changing is left alone", async () => {
     ownerWaiting(OWNER_WAIT_MS);
-    await check(m.sys, p);
+    for (let i = 0; i < 5; i++) await pass(`working ${i}m`, STUCK_MS / 2);
+    expect(leadRuns()).toEqual([]);
+  });
+
+  test("once the limit is off the screen, the missed messages go back to the lead; a HELD send is retried", async () => {
+    ownerWaiting(OWNER_WAIT_MS);
+    await pass(LIMIT_LINE);
     expect(replays()).toEqual([]);
-    m.screens.set("t1", "> idle");
     m.sendReply = { code: 3, out: "HELD lead: delivery may or may not have reached the pane" };
-    m.clock += MIN;
-    await check(m.sys, p);
+    await pass("> idle");
     expect(replays()).toHaveLength(1);
     m.sendReply = { code: 0, out: "DELIVERED lead" };
-    m.clock += MIN;
-    await check(m.sys, p);
+    await pass("> idle");
     expect(replays()).toHaveLength(2);
     const text = replays()[1]!.at(-1)!;
     expect(text).toStartWith("[missed during limit]");
     expect(text).toContain("너 왜 사라짐");
-    m.clock += MIN;
-    await check(m.sys, p);
+    await pass("> idle");
     expect(replays()).toHaveLength(2);
     expect(m.logs.join("\n")).toContain("REPLAY 1 owner message(s)");
   });
 
-  test("a wait that never hit a limit is not replayed", async () => {
+  test("a replay whose turn hit the limit again is repeated after the limit clears, not sooner than the gap", async () => {
     ownerWaiting(OWNER_WAIT_MS);
-    for (let i = 0; i < 3; i++) {
-      m.screens.set("t1", `working ${i}`);
-      await check(m.sys, p);
-      m.clock += MIN;
-    }
-    expect(m.calls.filter((c) => c.includes("send") && (c.at(-1) ?? "").startsWith("[missed during limit]"))).toEqual(
-      [],
-    );
+    await pass(LIMIT_LINE);
+    await pass("> idle");
+    expect(replays()).toHaveLength(1);
+    await pass(`[missed during limit] ...\n${LIMIT_LINE}`);
+    await pass("> idle again");
+    expect(replays()).toHaveLength(1); // within REPLAY_GAP_MS of the first replay
+    m.clock += REPLAY_GAP_MS;
+    await pass("> idle again");
+    expect(replays()).toHaveLength(2);
   });
 
-  test("a lead whose screen keeps changing is left alone", async () => {
+  test("a limit that comes and goes inside the first ten minutes is still replayed, before any alert", async () => {
+    ownerWaiting(MIN);
+    await pass(LIMIT_LINE);
+    await pass("> idle");
+    expect(replays()).toHaveLength(1);
+    expect(alerts()).toEqual([]);
+  });
+
+  test("a wait that never hit a limit is not replayed", async () => {
     ownerWaiting(OWNER_WAIT_MS);
-    for (let i = 0; i < 5; i++) {
-      m.screens.set("t1", `working ${i}m`);
-      await check(m.sys, p);
-      m.clock += STUCK_MS / 2;
-    }
-    expect(leadRuns()).toEqual([]);
+    for (let i = 0; i < 3; i++) await pass(`working ${i}`);
+    expect(replays()).toEqual([]);
   });
 });
