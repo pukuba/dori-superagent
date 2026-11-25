@@ -146,7 +146,7 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
   const seen = new Set((st.seen ?? []).filter((a) => terms.some((t) => t.address === a)));
   for (const role of ROLES) {
     const mine = terms.filter((t) => t.labels["dori.role"] === role);
-    const live = mine.filter((t) => alive(t, role, procs, p.agentCmd));
+    const live = mine.filter((t) => alive(t, role, procs, p));
     for (const t of live) seen.add(t.address);
     if (live.length > 0) {
       const keep = live.find((t) => roles[role] === `hc:${t.address}`) ?? live[0]!;
@@ -200,10 +200,11 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
     delete st.agentless[role];
     streak[role] = (streak[role] ?? 0) + 1;
     try {
-      if (role === "lead") writeHandoff(p, reason ? `${reason}; ${why}` : why, sys);
+      const retireNote = role === "lead" ? writeHandoff(p, reason ? `${reason}; ${why}` : why, sys) : undefined;
       const address = await launch(sys, p, group, role);
       seen.add(address);
       setRole(p, role, address);
+      retireNote?.();
       actions.push(`RELAUNCH ${role}=hc:${address} (${why})`);
     } catch (e) {
       actions.push(`ERR relaunch of ${role} failed: ${e instanceof Error ? e.message : String(e)}`);

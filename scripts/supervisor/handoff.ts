@@ -7,12 +7,17 @@ import { handoffFile, listeners } from "./world.ts";
 /** A restart-host note is passed on only while it is this fresh. */
 const NOTE_FRESH_MS = 30 * 60_000;
 
-/** Writes the relaunched lead's first prompt: why it is back, the listeners to arm, and a fresh restart note once. */
-export function writeHandoff(p: Paths, why: string, sys: Sys): void {
+/**
+ * Writes the relaunched lead's first prompt: why it is back, the listeners to arm, and a fresh restart note. Returns the
+ * step that retires the note, for the caller to run once the launch succeeded, so a failed launch keeps it for the next.
+ */
+export function writeHandoff(p: Paths, why: string, sys: Sys): () => void {
   const note = restartNote(p);
   const fresh = existsSync(note) && sys.now() - statSync(note).mtimeMs < NOTE_FRESH_MS;
   const extra = fresh ? readFileSync(note, "utf8").trim() : "";
-  if (existsSync(note)) renameSync(note, `${note}.used`);
+  const retire = (): void => {
+    if (existsSync(note)) renameSync(note, `${note}.used`);
+  };
   const monitors = listeners(p)
     .map(
       (l, i) =>
@@ -27,6 +32,7 @@ export function writeHandoff(p: Paths, why: string, sys: Sys): void {
     .replaceAll("{{repo}}", () => p.repo)
     .replaceAll("{{note}}", () => (extra ? `\nNote left by the session that asked for the restart:\n${extra}\n` : ""));
   writeFileSync(handoffFile(p), text);
+  return retire;
 }
 
 /** Tells the owner once, over Telegram when this home has it, that a role keeps failing to start. Never throws. */

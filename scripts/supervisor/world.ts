@@ -23,10 +23,20 @@ export function agentPattern(agentCmd: string): RegExp {
   return new RegExp(`${OMO.source}|(^|[/\\s])${base}(\\s|$)`);
 }
 /** What must run under a role's terminal for it to count as alive: the agent, or the loop's own dori command. */
-const LOOPS: Readonly<Record<"duty-loop" | "hourly-loop", RegExp>> = {
-  "duty-loop": /cli\.ts duty\b/,
-  "hourly-loop": /cli\.ts loop\b/,
-};
+const LOOP_ARG: Readonly<Record<"duty-loop" | "hourly-loop", string>> = { "duty-loop": "duty", "hourly-loop": "loop" };
+
+/**
+ * A loop runs `<doriCmd> duty|loop`: the program is the harness's cli.ts, the `dori` bin, or whatever program `doriCmd`
+ * names (its first word that is not an env assignment, `env` or `bun`, by basename).
+ */
+export function loopPattern(doriCmd: string, role: "duty-loop" | "hourly-loop"): RegExp {
+  const words = doriCmd
+    .split(/\s+/)
+    .map((w) => w.replace(/^['"]|['"]$/g, ""))
+    .filter((w) => w !== "" && !w.includes("=") && w !== "env" && !/(^|\/)bun$/.test(w));
+  const program = escapeRe((words[0] ?? "dori").split("/").at(-1) ?? "dori");
+  return new RegExp(`(^|[/\\s])(cli\\.ts|dori|${program})\\s+${LOOP_ARG[role]}\\b`);
+}
 const NAMES: Readonly<Record<Role, string>> = {
   lead: "dori",
   duty: "duty",
@@ -104,9 +114,9 @@ export function treeOf(procs: readonly Proc[], roots: readonly number[]): Set<nu
   return seen;
 }
 
-export function alive(t: Term, role: Role, procs: readonly Proc[], agentCmd: string): boolean {
+export function alive(t: Term, role: Role, procs: readonly Proc[], p: Pick<Paths, "agentCmd" | "doriCmd">): boolean {
   const tree = treeOf(procs, [t.pid]);
-  const want = role === "lead" || role === "duty" ? agentPattern(agentCmd) : LOOPS[role];
+  const want = role === "lead" || role === "duty" ? agentPattern(p.agentCmd) : loopPattern(p.doriCmd, role);
   return procs.some((p) => p.pid !== t.pid && tree.has(p.pid) && want.test(p.cmd));
 }
 

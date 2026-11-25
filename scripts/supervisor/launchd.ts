@@ -82,9 +82,12 @@ export async function install(sys: Sys, p: Paths): Promise<number> {
 
 export async function uninstall(sys: Sys, p: Paths): Promise<number> {
   const file = agentPlist(p);
-  await sys.run(["launchctl", "bootout", `${await domain(sys)}/${supervisorLabel(p)}`]);
-  if (existsSync(file)) rmSync(file);
-  sys.log(`UNINSTALLED ${supervisorLabel(p)}`);
+  const gui = await domain(sys);
+  await sys.run(["launchctl", "bootout", `${gui}/${supervisorLabel(p)}`]);
+  // A restart-host job left loaded would still run its restart after the supervisor is gone.
+  await sys.run(["launchctl", "bootout", `${gui}/${restartLabel(p)}`]);
+  for (const f of [file, join(p.home, "supervisor", `${restartLabel(p)}.plist`)]) if (existsSync(f)) rmSync(f);
+  sys.log(`UNINSTALLED ${supervisorLabel(p)} and ${restartLabel(p)}`);
   return 0;
 }
 

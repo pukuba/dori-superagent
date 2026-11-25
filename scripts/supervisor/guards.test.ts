@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
-import { check } from "./check.ts";
+import { check, GRACE_MS, AGENTLESS_MS } from "./check.ts";
+import { uninstall } from "./launchd.ts";
 import { healthy, Machine } from "./machine.ts";
 import type { Paths } from "./sys.ts";
 
@@ -55,5 +56,44 @@ describe("supervisor guards", () => {
     expect(readFileSync(join(home, "supervisor", "handoff-lead.md"), "utf8")).toContain(
       "run printf $'a\\tb' then $& and $$",
     );
+  });
+
+  test("loops run through DORI_CMD=dori count as alive, so a healthy relaunched loop is never killed", async () => {
+    const q = { ...p, doriCmd: "dori" };
+    m.procs = m.procs.map((pr) =>
+      pr.pid === 31
+        ? { ...pr, cmd: "bun /u/.bun/bin/dori duty --interval 60" }
+        : pr.pid === 41
+          ? { ...pr, cmd: "bun /u/.bun/bin/dori loop" }
+          : pr,
+    );
+    for (let i = 0; i < 4; i++) {
+      await check(m.sys, q);
+      m.clock += GRACE_MS + AGENTLESS_MS;
+    }
+    expect(m.ran("run")).toEqual([]);
+    expect(m.calls.some((c) => c[1] === "kill")).toBe(false);
+    expect(m.logs.join("\n")).not.toContain("WARN");
+  });
+
+  test("a failed lead launch keeps the restart note for the next attempt", async () => {
+    mkdirSync(join(home, "supervisor"));
+    writeFileSync(join(home, "supervisor", "restart-note.md"), "grants changed");
+    m.clock = Date.now();
+    m.terms.delete("t1");
+    m.runFails = true;
+    await check(m.sys, p);
+    expect(readFileSync(join(home, "supervisor", "restart-note.md"), "utf8")).toBe("grants changed");
+    m.runFails = false;
+    m.clock += GRACE_MS + 1;
+    await check(m.sys, p);
+    expect(readFileSync(join(home, "supervisor", "handoff-lead.md"), "utf8")).toContain("grants changed");
+    expect(readFileSync(join(home, "supervisor", "restart-note.md.used"), "utf8")).toBe("grants changed");
+  });
+
+  test("uninstall also unloads this home's restart-host job", async () => {
+    await uninstall(m.sys, p);
+    const outs = m.calls.filter((c) => c[0] === "launchctl" && c[1] === "bootout").map((c) => c[2]!.split("/").at(-1));
+    expect(outs).toEqual([`dev.dori.supervisor.${groupId(home)}`, `dev.dori.restart-host.${groupId(home)}`]);
   });
 });
