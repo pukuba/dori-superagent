@@ -30,7 +30,21 @@ const flag = (argv: readonly string[], name: string): string | undefined => {
   return i < 0 ? undefined : argv[i + 1];
 };
 
-export async function main(argv: readonly string[], sys: Sys = realSys, p: Paths = paths()): Promise<number> {
+/** The commands that drive launchd; `check` itself only needs hc and ps, so it can run from another host's scheduler. */
+const LAUNCHD = new Set(["install", "uninstall", "restart-host", "restart-run"]);
+
+export async function main(
+  argv: readonly string[],
+  sys: Sys = realSys,
+  p: Paths = paths(),
+  platform: string = process.platform,
+): Promise<number> {
+  if (LAUNCHD.has(argv[0] ?? "") && platform !== "darwin") {
+    sys.log(
+      `REFUSED ${argv[0]} uses launchd and supports macOS only, not ${platform}; schedule "main.ts check" every minute with this host's scheduler instead`,
+    );
+    return 2;
+  }
   const delayS = Number(flag(argv, "delay") ?? "20");
   const core = argv.includes("--core");
   switch (argv[0]) {
