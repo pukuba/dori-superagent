@@ -25,6 +25,7 @@ export class Machine {
     now: () => this.clock,
     sleep: async () => this.onSleep(),
     log: (l) => void this.logs.push(l),
+    env: { DORI_RUNTIME: "hc" },
   };
   constructor(readonly group: string) {}
   term(address: string, role: string, pid: number, agentCmd?: string): void {

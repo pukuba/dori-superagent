@@ -5,6 +5,8 @@ export type Sys = {
   readonly now: () => number;
   readonly sleep: (ms: number) => Promise<void>;
   readonly log: (line: string) => void;
+  /** The environment dori's own runtime choice reads (DORI_RUNTIME, HC_TERMINAL_ID, HERDR_PANE_ID, PATH). */
+  readonly env: Readonly<Record<string, string | undefined>>;
 };
 
 const RUN_TIMEOUT_MS = 60_000;
@@ -35,6 +37,7 @@ export const realSys: Sys = {
   now: Date.now,
   sleep: (ms) => Bun.sleep(ms),
   log: (line) => console.log(`${new Date().toISOString()} ${line}`),
+  env: process.env,
 };
 
 /** Where things live: the dori home, this checkout, the bun binary, the agent command and the shell new terminals run. */

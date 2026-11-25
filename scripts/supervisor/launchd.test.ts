@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
-import { restartRun } from "./launchd.ts";
+import { plist, restartRun, scheduleRestart } from "./launchd.ts";
 import { Machine } from "./machine.ts";
 import type { Paths } from "./sys.ts";
 
@@ -26,6 +26,27 @@ beforeEach(() => {
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 describe("restart-host job", () => {
+  test("schedules one per-home launchd job whose plist is escaped and carries no secrets; refuses while one runs", async () => {
+    const q = { ...p, repo: "/r&d/<repo>" };
+    writeFileSync(join(home, "telegram.env"), "DORI_TELEGRAM_TOKEN=123:secret-token");
+    expect(await scheduleRestart(m.sys, q, { core: false, delayS: 5, note: "why" })).toBe(0);
+    const label = `dev.dori.restart-host.${groupId(home)}`;
+    const file = join(home, "supervisor", `${label}.plist`);
+    const xml = readFileSync(file, "utf8");
+    expect(xml).toContain(`<string>${label}</string>`);
+    expect(xml).toContain("<string>restart-run</string><string>--delay</string><string>5</string>");
+    expect(xml).toContain("/r&amp;d/&lt;repo&gt;");
+    for (const key of ["PATH", "HOME", "DORI_HOME", "SHELL", "DORI_AGENT_CMD", "DORI_CMD"])
+      expect(xml).toContain(`<key>${key}</key>`);
+    expect(xml).not.toContain("secret-token");
+    expect(m.calls.some((c) => c[0] === "launchctl" && c[1] === "bootstrap" && c[3] === file)).toBe(true);
+    expect(readFileSync(join(home, "supervisor", "restart-note.md"), "utf8")).toBe("why\n");
+    writeFileSync(join(home, "supervisor", "restarting"), "now");
+    m.clock = Date.now();
+    expect(await scheduleRestart(m.sys, q, { core: false, delayS: 5 })).toBe(1);
+    expect(plist(q, "x", ["check"], "", "/tmp/l")).toContain("<key>Label</key><string>x</string>");
+  });
+
   test("a holder that never comes back alerts the owner; a lock never freed fails the job", async () => {
     writeFileSync(join(home, "telegram.env"), "");
     mkdirSync(join(home, "supervisor", "lock"), { recursive: true });

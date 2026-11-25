@@ -20,12 +20,12 @@ export function writeHandoff(p: Paths, why: string, sys: Sys): void {
     )
     .join("\n");
   const text = readFileSync(join(p.repo, "prompts", "supervisor-handoff.md"), "utf8")
-    .replaceAll("{{time}}", new Date(sys.now()).toISOString())
-    .replaceAll("{{reason}}", why)
-    .replaceAll("{{monitors}}", monitors || "2. No inbound listener credentials are configured in this home.")
-    .replaceAll("{{home}}", p.home)
-    .replaceAll("{{repo}}", p.repo)
-    .replaceAll("{{note}}", extra ? `\nNote left by the session that asked for the restart:\n${extra}\n` : "");
+    .replaceAll("{{time}}", () => new Date(sys.now()).toISOString())
+    .replaceAll("{{reason}}", () => why)
+    .replaceAll("{{monitors}}", () => monitors || "2. No inbound listener credentials are configured in this home.")
+    .replaceAll("{{home}}", () => p.home)
+    .replaceAll("{{repo}}", () => p.repo)
+    .replaceAll("{{note}}", () => (extra ? `\nNote left by the session that asked for the restart:\n${extra}\n` : ""));
   writeFileSync(handoffFile(p), text);
 }
 

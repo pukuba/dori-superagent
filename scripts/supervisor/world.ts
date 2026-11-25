@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { shq } from "../../src/delivery.ts";
+import { readRuntimeChoice } from "../../src/runtime/select.ts";
 import type { Paths, Sys } from "./sys.ts";
 
 export const ROLES = ["lead", "duty", "duty-loop", "hourly-loop"] as const;
@@ -41,6 +42,15 @@ const json = (text: string): Record<string, unknown> => {
     return {};
   }
 };
+
+/** The runtime dori itself would choose for this home (env, config, session, PATH), or why it cannot choose one. */
+export function runtimeOf(p: Paths, env: Readonly<Record<string, string | undefined>>): string {
+  try {
+    return readRuntimeChoice({ env, configPath: join(p.home, "config.json") }).kind;
+  } catch (e) {
+    return `no runtime (${e instanceof Error ? e.message : String(e)})`;
+  }
+}
 
 export async function hcUp(sys: Sys): Promise<boolean> {
   return (await sys.run(["hc", "server", "status", "--json"])).code === 0;
@@ -132,7 +142,10 @@ export function listeners(p: Paths): Listener[] {
 function promptFile(p: Paths, name: string): string {
   const out = join(p.home, "prompts", name);
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, readFileSync(join(p.repo, "prompts", name), "utf8").replaceAll("{{dori}}", p.doriCmd));
+  writeFileSync(
+    out,
+    readFileSync(join(p.repo, "prompts", name), "utf8").replaceAll("{{dori}}", () => p.doriCmd),
+  );
   return out;
 }
 

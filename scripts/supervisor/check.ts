@@ -5,7 +5,7 @@ import { alertOwner, writeHandoff } from "./handoff.ts";
 import { tendListeners } from "./listeners.ts";
 import { pauseFile, readJson, restartMarker, type State, supervisorDir } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
-import { alive, close, groupTerms, hcUp, launch, processes, ROLES, type Role, type Term } from "./world.ts";
+import { alive, runtimeOf, close, groupTerms, hcUp, launch, processes, ROLES, type Role, type Term } from "./world.ts";
 
 /** A relaunched session gets this long to start its agent before it counts as dead. */
 export const GRACE_MS = 3 * 60_000;
@@ -107,9 +107,9 @@ function takeLock(lock: string, token: string, sys: Sys): boolean {
 }
 
 async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<number> {
-  const runtime = readJson<{ runtime?: string }>(join(p.home, "config.json"), {}).runtime;
-  if (runtime !== undefined && runtime !== "hc")
-    return said(sys, `SKIP runtime is ${runtime}; the supervisor handles hc`, 0);
+  // The same choice dori makes (DORI_RUNTIME, config, session, PATH): a herdr home must never get hc sessions opened.
+  const runtime = runtimeOf(p, sys.env);
+  if (runtime !== "hc") return said(sys, `SKIP this home runs on ${runtime}; the supervisor handles hc only`, 0);
   if (!(await hcUp(sys))) {
     sys.log("REPAIR hc core is down: hc server start");
     // Output to /dev/null: a core that daemonizes must not hold this pass's pipes open.
@@ -159,6 +159,10 @@ async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State)
       if (role === "lead") lead = keep;
       delete st.agentless[role];
       delete streak[role];
+      continue;
+    }
+    if (roles[role] !== undefined && !roles[role]!.startsWith("hc:")) {
+      actions.push(`WARN ${role} is registered on ${roles[role]}, not hc; leaving it alone`);
       continue;
     }
     const launchedAt = st.launched[role];

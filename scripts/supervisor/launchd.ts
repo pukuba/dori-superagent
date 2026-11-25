@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
-import { check } from "./check.ts";
+import { check, RESTART_WINDOW_MS } from "./check.ts";
 import { alertOwner } from "./handoff.ts";
 import { restartMarker, restartNote } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
+import { runtimeOf } from "./world.ts";
 
 /** One job per dori home (its group id), so a second home on the same Mac never replaces the first. */
 export const supervisorLabel = (p: Paths): string => `dev.dori.supervisor.${groupId(p.home)}`;
@@ -64,6 +65,11 @@ async function load(sys: Sys, label: string, file: string): Promise<void> {
 
 /** Installs and loads the LaunchAgent that runs \`check\` at login and every 60 seconds, surviving reboots and host restarts. */
 export async function install(sys: Sys, p: Paths): Promise<number> {
+  const runtime = runtimeOf(p, sys.env);
+  if (runtime !== "hc") {
+    sys.log(`REFUSED this home runs on ${runtime}; the supervisor handles hc only`);
+    return 2;
+  }
   const file = agentPlist(p);
   mkdirSync(dirname(file), { recursive: true });
   const extra =
@@ -92,6 +98,12 @@ export async function scheduleRestart(
   o: { core: boolean; delayS: number; note?: string },
 ): Promise<number> {
   mkdirSync(join(p.home, "supervisor"), { recursive: true });
+  // A second restart would boot out the running job between stopping the holder and relaunching the lead.
+  const marker = restartMarker(p);
+  if (existsSync(marker) && sys.now() - statSync(marker).mtimeMs < RESTART_WINDOW_MS) {
+    sys.log("REFUSED a host restart is already in progress; wait for it to finish");
+    return 1;
+  }
   if (o.note) writeFileSync(restartNote(p), `${o.note}\n`);
   const file = join(p.home, "supervisor", `${restartLabel(p)}.plist`);
   const args = ["restart-run", "--delay", String(o.delayS), ...(o.core ? ["--core"] : [])];

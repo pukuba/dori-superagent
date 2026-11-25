@@ -52,7 +52,12 @@ export async function main(
     );
     return 2;
   }
-  const delayS = Number(flag(argv, "delay") ?? "20");
+  const delay = argv.includes("--delay") ? flag(argv, "delay") : "20";
+  if (delay === undefined || !/^\d+$/.test(delay)) {
+    sys.log("REFUSED --delay takes a whole number of seconds");
+    return 64;
+  }
+  const delayS = Number(delay);
   const core = argv.includes("--core");
   switch (argv[0]) {
     case "check":
