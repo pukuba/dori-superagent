@@ -1,22 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
+import { alertOwner, writeHandoff } from "./handoff.ts";
 import { tendListeners } from "./listeners.ts";
-import { pauseFile, readJson, restartMarker, restartNote, type State, supervisorDir } from "./state.ts";
+import { pauseFile, readJson, restartMarker, type State, supervisorDir } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
-import {
-  alive,
-  close,
-  groupTerms,
-  handoffFile,
-  hcUp,
-  launch,
-  listeners,
-  processes,
-  ROLES,
-  type Role,
-  type Term,
-} from "./world.ts";
+import { alive, close, groupTerms, hcUp, launch, processes, ROLES, type Role, type Term } from "./world.ts";
 
 /** A relaunched session gets this long to start its agent before it counts as dead. */
 export const GRACE_MS = 3 * 60_000;
@@ -30,7 +19,6 @@ export const RESTART_WINDOW_MS = 10 * 60_000;
 const LOCK_STALE_MS = 10 * 60_000;
 /** How long (2s steps) the restart job waits for a scheduled pass to release the lock. */
 const LOCK_WAIT_TRIES = 90;
-const NOTE_FRESH_MS = 30 * 60_000;
 /** The same summary line is logged again at most this often. */
 const OK_LOG_EVERY_MS = 60 * 60_000;
 
@@ -43,39 +31,6 @@ function setRole(p: Paths, role: Role, address: string): void {
   const file = join(p.home, "roles.json");
   const roles = { ...readJson<Record<string, string>>(file, {}), [role]: `hc:${address}` };
   writeFileSync(file, `${JSON.stringify(roles, null, 2)}\n`);
-}
-
-function writeHandoff(p: Paths, why: string, sys: Sys): void {
-  const note = restartNote(p);
-  const fresh = existsSync(note) && sys.now() - statSync(note).mtimeMs < NOTE_FRESH_MS;
-  const extra = fresh ? readFileSync(note, "utf8").trim() : "";
-  if (existsSync(note)) renameSync(note, `${note}.used`);
-  const monitors = listeners(p)
-    .map(
-      (l, i) =>
-        `${i + 2}. Arm a PERSISTENT monitor (${l.kind} inbound): command \`${l.command}\`, filter ^(INBOUND|WARN|ERR).`,
-    )
-    .join("\n");
-  const text = readFileSync(join(p.repo, "prompts", "supervisor-handoff.md"), "utf8")
-    .replaceAll("{{time}}", new Date(sys.now()).toISOString())
-    .replaceAll("{{reason}}", why)
-    .replaceAll("{{monitors}}", monitors || "2. No inbound listener credentials are configured in this home.")
-    .replaceAll("{{home}}", p.home)
-    .replaceAll("{{repo}}", p.repo)
-    .replaceAll("{{note}}", extra ? `\nNote left by the session that asked for the restart:\n${extra}\n` : "");
-  writeFileSync(handoffFile(p), text);
-}
-
-/** Tells the owner once, over Telegram when this home has it, that a role keeps failing to start. Never throws. */
-export async function alertOwner(sys: Sys, p: Paths, text: string): Promise<string> {
-  const env = join(p.home, "telegram.env");
-  if (!existsSync(env)) return "no telegram.env to alert through";
-  const file = join(supervisorDir(p), "alert.txt");
-  writeFileSync(file, text);
-  const dir = join(p.repo, "skills", "dori-mode", "scripts");
-  const script = `. "$1"; cd "$2" && bun src/cli.ts send telegram --to "$DORI_TELEGRAM_OWNER_ID" --text "$(cat "$3")"`;
-  const r = await sys.run(["/bin/bash", "-c", script, "alert", env, dir, file]);
-  return r.code === 0 ? "alerted the owner on Telegram" : `alert failed (exit ${r.code})`;
 }
 
 /** One supervision pass under a lock: hc up, each role alive and registered, the lead's listeners armed. 0 = fine or repaired. */

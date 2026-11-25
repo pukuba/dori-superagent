@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { groupId } from "../../src/runtime/group.ts";
-import { alertOwner, check } from "./check.ts";
+import { check } from "./check.ts";
+import { alertOwner } from "./handoff.ts";
 import { restartMarker, restartNote } from "./state.ts";
 import type { Paths, Sys } from "./sys.ts";
 
