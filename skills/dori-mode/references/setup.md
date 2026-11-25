@@ -84,6 +84,10 @@ Arm these as persistent monitors in your own session:
 | Telegram inbound (Telegram only) | `DORI_TELEGRAM_TOKEN=… DORI_TELEGRAM_OWNER_ID=… dori inbound telegram --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
 
-## 6. First look around
+## 6. Supervisor (macOS, hc)
+
+Install the LaunchAgent that keeps the harness alive: `DORI_HOME=~/.dori bun scripts/supervisor/main.ts install` in the dori-superagent checkout. Every 60 seconds and at login it checks that the hc core is up, that the lead, duty and both loops are alive and registered, and that the lead runs its inbound listeners. It repairs whatever is missing: it starts the core, re-registers a live session, and relaunches a lost lead with a handoff prompt (`prompts/supervisor-handoff.md`). It nudges the lead to re-arm missing listeners and stops orphaned ones. It never opens a second lead while one is alive. The log is `~/Library/Logs/dori-supervisor.log`; `pause` and `resume` stop and restart repairs. To restart the host, use `restart-host --text '<why>'`, never a direct restart.
+
+## 7. First look around
 
 Once the bot is live, explore the machine: running coding-agent sessions, the tools in use, recent logs. Write what you find into memory, and adopt any running lanes with `dori adopt`.

@@ -75,6 +75,7 @@ Real work runs in its own session, called a lane: a herdr tab, or a labelled ter
 - **Several lanes on one repo:** each lane's Done is its branch pushed with the gates green, not a merge. Merging into main, and the rebases that follow, belong to the lead or a short integration lane, in order. When a lane has to rebase, send that as ordinary input; `dori object-done` is for a claim that does not hold, not for merge coordination.
 - **Before messaging a session**, confirm it runs a live agent (`herdr pane process-info --pane <id>` / `hc get <t>`) with an empty input line, send once, and verify the text left the input. Never send to a shell, a stopped agent or an approval prompt.
 - Watch for sessions that turn blocked or ask a question; answer them or bring them to the owner.
+- Never restart Herdr Core, hc or the host from inside a session: the restart kills your own session and its inbound monitors. Use `bun scripts/supervisor/main.ts restart-host --text '<why>'` (in the dori-superagent checkout), which restarts from a detached launchd job. The supervisor LaunchAgent (`bun scripts/supervisor/main.ts install`) brings the lead, duty and loops back after any restart, crash, reboot or lost pane, hands the new lead its context, and asks it to re-arm the inbound monitors.
 - After a restart or a compaction, run `dori boot` before acting on what you remember. A `VANISHED` lane keeps its registry record and worktree; find out what happened before relaunching it.
 
 ## Standing rules
