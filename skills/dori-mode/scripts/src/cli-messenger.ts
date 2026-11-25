@@ -2,7 +2,14 @@
 import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
-import { ownerSpoke, ownerWaitDone, slackOwnerLine, telegramOwnerLine, yenaReplied } from "./messenger/owner-wait.ts";
+import {
+  ownerSpoke,
+  ownerWaitDone,
+  slackOwnerLine,
+  slackTarget,
+  telegramOwnerLine,
+  yenaReplied,
+} from "./messenger/owner-wait.ts";
 import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
@@ -42,7 +49,7 @@ const send: Command = async ({ key, need, opt, values, config }) => {
       const posted = await slack.post(to, text, threadTs);
       console.log(`SENT ${posted.ts}`);
       // The channel Slack posted in: a DM sent by user id resolves to the D… channel the owner's wait recorded.
-      replied(config.stateDir, `slack:${posted.channel}`);
+      replied(config.stateDir, slackTarget(posted.channel, threadTs));
     }
   } else if (platform === "telegram") {
     // Number("telegram:-1001/42") is NaN, and the Telegram target drops a falsy threadId, so a bad --thread

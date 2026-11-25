@@ -13,8 +13,8 @@ import { run } from "../src/run.ts";
 import { withState } from "./fakes.ts";
 
 const wait = (dir: string) => JSON.parse(readFileSync(join(dir, "owner-wait.json"), "utf8")) as Record<string, unknown>;
-const slackC1 = { where: "Slack C1", target: "slack:C1" };
-const tgDm = { where: "Telegram DM", target: "telegram:7" };
+const slackC1 = { where: "Slack C1", targets: ["slack:C1"] };
+const tgDm = { where: "Telegram DM", targets: ["telegram:7"] };
 
 test("the oldest unanswered message starts the wait; targets and the last 10 texts are kept", () => {
   const state = withState();
@@ -42,6 +42,7 @@ test("only a post where the owner wrote, or owner-wait done, ends the wait; a po
   try {
     ownerSpoke(state.dir, slackC1, "hi?", 1000);
     yenaReplied(state.dir, "slack:C-OTHER", 2000);
+    yenaReplied(state.dir, "slack:C1/5.0", 2000);
     yenaReplied(state.dir, "telegram:7", 2000);
     expect(wait(state.dir)["since"]).toBe(1000);
     yenaReplied(state.dir, "slack:C1", 3000);
@@ -71,12 +72,15 @@ test("a stale lock left by a dead writer is taken over", () => {
 
 test("only the configured owner's Slack lines and the owner's new Telegram DMs count", () => {
   const slack = { source: "own-thread", channel: "C1", ts: "2.0", threadTs: "1.0", user: "UOWNER" } as const;
-  expect(slackOwnerLine(slack, "UOWNER")).toEqual({ where: "Slack C1 thread 1.0", target: "slack:C1" });
-  expect(slackOwnerLine({ ...slack, source: "threads-view", threadTs: undefined }, "UOWNER")?.where).toBe("Slack C1");
+  expect(slackOwnerLine(slack, "UOWNER")).toEqual({ where: "Slack C1 thread 1.0", targets: ["slack:C1/1.0"] });
+  expect(slackOwnerLine({ ...slack, source: "threads-view", threadTs: undefined }, "UOWNER")).toEqual({
+    where: "Slack C1",
+    targets: ["slack:C1", "slack:C1/2.0"],
+  });
   expect(slackOwnerLine({ ...slack, user: "UOTHER" }, "UOWNER")).toBeUndefined();
   expect(slackOwnerLine(slack, undefined)).toBeUndefined();
   const tg = { kind: "message", source: "dm", chat: 7, updateId: 1, from: 7 } as const;
-  expect(telegramOwnerLine(tg, 7)).toEqual({ where: "Telegram DM", target: "telegram:7" });
+  expect(telegramOwnerLine(tg, 7)).toEqual({ where: "Telegram DM", targets: ["telegram:7"] });
   expect(telegramOwnerLine({ ...tg, kind: "edit" }, 7)).toBeUndefined();
   expect(telegramOwnerLine({ ...tg, source: "topic" }, 7)).toBeUndefined();
   expect(telegramOwnerLine({ ...tg, from: 8 }, 7)).toBeUndefined();
@@ -87,7 +91,7 @@ test("a send to where the owner wrote ends his wait (Slack by the channel it lan
   try {
     const config = join(state.dir, "config.json");
     writeFileSync(config, JSON.stringify({ stateDir: state.dir, defaultCwd: state.dir, hooks: {} }));
-    const send = (platform: string, to: string, ...env: string[]) =>
+    const send = (platform: string, to: string, env: string[] = [], flags: string[] = []) =>
       run(
         [
           "env",
@@ -107,20 +111,28 @@ test("a send to where the owner wrote ends his wait (Slack by the channel it lan
           to,
           "--text",
           "hi",
+          ...flags,
         ],
         { timeoutMs: 20_000 },
       );
     ownerSpoke(state.dir, tgDm, "hi?", 1000);
-    expect((await send("telegram", "7", "DORI_NOT_A_REPLY=1")).code).toBe(0);
+    expect((await send("telegram", "7", ["DORI_NOT_A_REPLY=1"])).code).toBe(0);
     expect((await send("telegram", "8")).code).toBe(0);
     expect(wait(state.dir)["since"]).toBe(1000);
     expect((await send("telegram", "7")).code).toBe(0);
     expect(wait(state.dir)["since"]).toBeUndefined();
     // Slack: the owner wrote in his DM (D0WNER); a reply sent to his user id lands there and ends the wait.
-    ownerSpoke(state.dir, { where: "Slack D0WNER", target: "slack:D0WNER" }, "hi?", 2000);
+    ownerSpoke(state.dir, { where: "Slack D0WNER", targets: ["slack:D0WNER"] }, "hi?", 2000);
     expect((await send("slack", "C-OTHER")).code).toBe(0);
     expect(wait(state.dir)["since"]).toBe(2000);
     expect((await send("slack", "U0WNER")).code).toBe(0);
+    expect(wait(state.dir)["since"]).toBeUndefined();
+    // In a channel thread: a post in another thread of the same channel leaves the wait; one in his thread ends it.
+    ownerSpoke(state.dir, { where: "Slack C1 thread 1.0", targets: ["slack:C1/1.0"] }, "hi?", 3000);
+    expect((await send("slack", "C1", [], ["--thread", "9.9"])).code).toBe(0);
+    expect((await send("slack", "C1")).code).toBe(0);
+    expect(wait(state.dir)["since"]).toBe(3000);
+    expect((await send("slack", "C1", [], ["--thread", "1.0"])).code).toBe(0);
     expect(wait(state.dir)["since"]).toBeUndefined();
   } finally {
     state.done();

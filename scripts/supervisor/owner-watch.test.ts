@@ -159,6 +159,21 @@ describe("owner waiting on yena", () => {
     expect(replays()).toHaveLength(2);
   });
 
+  test("a limit error left on an idle lead's screen is replayed every REPLAY_GAP_MS, not only once it scrolls away", async () => {
+    ownerWaiting(OWNER_WAIT_MS);
+    await pass(LIMIT_LINE);
+    expect(replays()).toEqual([]);
+    m.clock += REPLAY_GAP_MS;
+    await pass(LIMIT_LINE);
+    expect(replays()).toHaveLength(1);
+    await pass(LIMIT_LINE);
+    expect(replays()).toHaveLength(1);
+    m.clock += REPLAY_GAP_MS;
+    await pass(LIMIT_LINE);
+    expect(replays()).toHaveLength(2);
+    expect(replays()[1]!.at(-1)).toContain("너 왜 사라짐");
+  });
+
   test("a limit that comes and goes inside the first ten minutes is still replayed, before any alert", async () => {
     ownerWaiting(MIN);
     await pass(LIMIT_LINE);

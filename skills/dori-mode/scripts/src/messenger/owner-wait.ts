@@ -4,8 +4,8 @@ import type { Inbound } from "./slack-inbound.ts";
 import type { TgInbound } from "./telegram-inbound.ts";
 
 /**
- * `<stateDir>/owner-wait.json`: since when the owner's oldest unanswered message has waited, where he wrote (`targets`,
- * e.g. `slack:C1` or `telegram:7`), and what he wrote. The inbound listeners start the wait, a `dori send` to one of
+ * `<stateDir>/owner-wait.json`: since when the owner's oldest unanswered message has waited, where he wrote (`targets`:
+ * `slack:<channel>[/<thread ts>]` or `telegram:<chat>`), and what he wrote. The inbound listeners start the wait, a `dori send` to one of
  * those targets ends it, and the supervisor alerts the owner when it runs too long.
  */
 type Said = { readonly at: number; readonly where: string; readonly text: string };
@@ -16,7 +16,7 @@ type OwnerWait = {
   readonly messages?: readonly Said[];
   readonly repliedAt?: number;
 };
-export type OwnerLine = { readonly where: string; readonly target: string };
+export type OwnerLine = { readonly where: string; readonly targets: readonly string[] };
 
 const KEEP = 10;
 const LOCK_STALE_MS = 10_000;
@@ -53,8 +53,16 @@ const locked = (file: string, change: (w: OwnerWait) => OwnerWait | undefined): 
       } catch {
         continue; // released between our mkdir and stat: try again at once
       }
-      if (age > LOCK_STALE_MS) rmSync(lock, { recursive: true, force: true });
-      else if (i >= LOCK_TRIES) throw new Error(`${lock} is held by another writer`);
+      if (age > LOCK_STALE_MS) {
+        // Moved aside under a unique name first: two writers that both saw it stale cannot both remove a live lock.
+        const aside = `${lock}.stale-${process.pid}-${i}`;
+        try {
+          renameSync(lock, aside);
+          rmSync(aside, { recursive: true, force: true });
+        } catch {
+          // another writer moved it first; the next mkdir decides
+        }
+      } else if (i >= LOCK_TRIES) throw new Error(`${lock} is held by another writer`);
       else Bun.sleepSync(10);
     }
   }
@@ -70,7 +78,7 @@ const locked = (file: string, change: (w: OwnerWait) => OwnerWait | undefined): 
 export const ownerSpoke = (stateDir: string, line: OwnerLine, text: string, now: number = Date.now()): void =>
   locked(fileOf(stateDir), (w) => {
     const open = w.since !== undefined;
-    const targets = new Set([...(open ? (w.targets ?? []) : []), line.target]);
+    const targets = new Set([...(open ? (w.targets ?? []) : []), ...line.targets]);
     const said = { at: now, where: line.where, text: text.slice(0, 500) };
     return {
       since: w.since ?? now,
@@ -90,14 +98,25 @@ export const yenaReplied = (stateDir: string, target: string, now: number = Date
 export const ownerWaitDone = (stateDir: string, now: number = Date.now()): void =>
   locked(fileOf(stateDir), () => ({ repliedAt: now }));
 
-/** A Slack line from the owner, or undefined when it is not his (or no owner id is configured). */
-export const slackOwnerLine = (i: Inbound, ownerId: string | undefined): OwnerLine | undefined =>
-  ownerId && i.user === ownerId && i.source !== "unread"
-    ? { where: `Slack ${i.channel}${i.threadTs ? ` thread ${i.threadTs}` : ""}`, target: `slack:${i.channel}` }
-    : undefined;
+/**
+ * A Slack line from the owner, or undefined when it is not his (or no owner id is configured). A thread reply is
+ * answered in that thread; a top-level message (a DM, a mention) in its channel or in a thread under it.
+ */
+export const slackOwnerLine = (i: Inbound, ownerId: string | undefined): OwnerLine | undefined => {
+  if (!ownerId || i.user !== ownerId || i.source === "unread") return undefined;
+  const where = `Slack ${i.channel}${i.threadTs ? ` thread ${i.threadTs}` : ""}`;
+  const targets = i.threadTs
+    ? [slackTarget(i.channel, i.threadTs)]
+    : [slackTarget(i.channel), ...(i.ts ? [slackTarget(i.channel, i.ts)] : [])];
+  return { where, targets };
+};
+
+/** The key a Slack post is matched by: its channel, and its thread when it is a thread reply. */
+export const slackTarget = (channel: string, threadTs?: string): string =>
+  threadTs ? `slack:${channel}/${threadTs}` : `slack:${channel}`;
 
 /** A new Telegram DM from the owner; edits and group topics do not start a wait. */
 export const telegramOwnerLine = (i: TgInbound, ownerId: number): OwnerLine | undefined =>
   i.kind === "message" && i.source === "dm" && i.from === ownerId
-    ? { where: "Telegram DM", target: `telegram:${i.chat}` }
+    ? { where: "Telegram DM", targets: [`telegram:${i.chat}`] }
     : undefined;

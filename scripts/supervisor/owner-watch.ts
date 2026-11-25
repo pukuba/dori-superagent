@@ -9,7 +9,10 @@ import type { Term } from "./world.ts";
 export const OWNER_WAIT_MS = 10 * 60_000;
 /** At most one such alert this often, however many waits start and end in between. */
 export const ALERT_GAP_MS = 30 * 60_000;
-/** Replays are never sent closer together than this: not after one whose turn hit the limit again, nor after a HELD one. */
+/**
+ * Replays are never sent closer together than this. While the limit error stays on the lead's screen (an idle lead
+ * prints nothing when the limit resets), the replay is retried this often: a replay under a live limit just fails.
+ */
 export const REPLAY_GAP_MS = 5 * 60_000;
 /**
  * The provider's own limit error (as on 2026-11-25: "You've hit your org's monthly spend limit … (rate_limit)"), looked
@@ -57,16 +60,14 @@ type OwnerWait = {
 type Watch = NonNullable<State["owner"]>;
 
 /**
- * The limit is no longer on the lead's screen but the owner still waits: the turns that failed under it consumed his
- * messages, so they go back into the lead's inbox. If the limit shows again afterwards (the replayed turn failed too),
- * the next clear replays again. DELIVERED or QUEUED counts as sent; HELD may have arrived, so like a failure it is only
- * retried after REPLAY_GAP_MS, which bounds a possible duplicate to one per gap.
+ * The owner's messages were consumed by turns that failed under a provider limit, so they go back into the lead's
+ * inbox. DELIVERED or QUEUED counts as sent; HELD may have arrived, so like a failure it waits out REPLAY_GAP_MS.
  */
 async function replay(sys: Sys, p: Paths, o: Watch, w: OwnerWait, since: number, now: number): Promise<string> {
   const lines = (w.messages ?? []).map(
     (m) => `- ${new Date(m.at).toISOString()} ${m.where}: ${JSON.stringify(m.text)}`,
   );
-  const text = `[missed during limit] Your screen no longer shows the provider limit, but these messages from the owner arrived while your turns were failing and are still unanswered (waiting since ${new Date(since).toISOString()}). Answer him now where he wrote:\n${lines.join("\n") || `- (text not recorded) ${w.where ?? ""}`}`;
+  const text = `[missed during limit] These messages from the owner arrived while your turns were failing on a provider limit and are still unanswered (waiting since ${new Date(since).toISOString()}). Answer him now where he wrote:\n${lines.join("\n") || `- (text not recorded) ${w.where ?? ""}`}`;
   const r = await sys.run([p.bun, join(p.repo, "src", "cli.ts"), "send", "lead", "--text", text], {
     DORI_HOME: p.home,
   });
@@ -81,7 +82,7 @@ async function replay(sys: Sys, p: Paths, o: Watch, w: OwnerWait, since: number,
 
 /**
  * The owner wrote (Slack or Telegram) and yena has not answered where he wrote. While the wait is open the lead's screen
- * is read every pass: a provider limit on it is remembered, and once it is gone the missed messages are replayed. Past
+ * is read every pass: a provider limit on it is remembered, and the missed messages are replayed (see REPLAY_GAP_MS). Past
  * OWNER_WAIT_MS the owner hears it on Telegram, rate-limited. The lead is never relaunched from here: an idle lead and a
  * wedged one look alike on screen, so replacing it is left to the owner.
  */
@@ -103,11 +104,19 @@ export async function watchOwner(
   const limited = screen !== undefined && limitShown(screen);
   const actions: string[] = [];
   if (limited) {
+    if (o.limitedFor !== since) {
+      o.limitSince = now;
+      delete o.replayTriedAt;
+    }
     o.limitedFor = since;
     o.limitAt = now;
-  } else if (lead && screen !== undefined && o.limitedFor === since) {
-    const due = o.replayTriedAt === undefined || now - o.replayTriedAt >= REPLAY_GAP_MS;
-    const owed = o.replayedFor !== since || (o.limitAt ?? 0) > (o.replayAt ?? 0);
+  }
+  if (lead && screen !== undefined && o.limitedFor === since) {
+    // Still limited: retry every REPLAY_GAP_MS from the first sighting. Cleared: replay at once, unless one went out
+    // after the last sighting of the limit.
+    const last = o.replayTriedAt ?? (limited ? o.limitSince : undefined);
+    const due = last === undefined || now - last >= REPLAY_GAP_MS;
+    const owed = limited || o.replayedFor !== since || (o.limitAt ?? 0) > (o.replayAt ?? 0);
     if (due && owed) actions.push(await replay(sys, p, o, w, since, now));
   }
   if (waited < OWNER_WAIT_MS) return actions;
