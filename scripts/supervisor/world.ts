@@ -13,11 +13,16 @@ export type Term = {
 export type Proc = { readonly pid: number; readonly ppid: number; readonly cmd: string };
 export type Listener = { readonly kind: string; readonly match: RegExp; readonly command: string };
 
-const AGENT = /senpi\/dist|omo-ai|(^|[/\s])omo(\s|$)/;
+const OMO = /senpi\/dist|omo-ai|(^|[/\s])omo(\s|$)/;
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, (c) => `\\${c}`);
+/** The agent `agentCmd` starts, by the basename of its first word, plus omo's own processes (it runs as bun + senpi). */
+export function agentPattern(agentCmd: string): RegExp {
+  const word = agentCmd.trim().split(/\s+/)[0] ?? "omo";
+  const base = escapeRe(word.split("/").at(-1) ?? word);
+  return new RegExp(`${OMO.source}|(^|[/\\s])${base}(\\s|$)`);
+}
 /** What must run under a role's terminal for it to count as alive: the agent, or the loop's own dori command. */
-const ALIVE: Readonly<Record<Role, RegExp>> = {
-  lead: AGENT,
-  duty: AGENT,
+const LOOPS: Readonly<Record<"duty-loop" | "hourly-loop", RegExp>> = {
   "duty-loop": /cli\.ts duty\b/,
   "hourly-loop": /cli\.ts loop\b/,
 };
@@ -80,9 +85,10 @@ export function treeOf(procs: readonly Proc[], roots: readonly number[]): Set<nu
   return seen;
 }
 
-export function alive(t: Term, role: Role, procs: readonly Proc[]): boolean {
+export function alive(t: Term, role: Role, procs: readonly Proc[], agentCmd: string): boolean {
   const tree = treeOf(procs, [t.pid]);
-  return procs.some((p) => p.pid !== t.pid && tree.has(p.pid) && ALIVE[role].test(p.cmd));
+  const want = role === "lead" || role === "duty" ? agentPattern(agentCmd) : LOOPS[role];
+  return procs.some((p) => p.pid !== t.pid && tree.has(p.pid) && want.test(p.cmd));
 }
 
 /** The inbound listeners this home has credentials for, each as the monitor command the lead arms. */
@@ -156,12 +162,14 @@ export async function launch(sys: Sys, p: Paths, group: string, role: Role): Pro
   if (r.code !== 0) r = await sys.run(argv(false));
   const address = json(r.out)["address"];
   if (r.code !== 0 || typeof address !== "string") throw new Error(`hc run for ${role} failed: ${r.err || r.out}`);
-  const sent = await sys.run(["hc", "send", address, startCommand(p, role)]);
+  // Same argv as the harness's own start(): `--` keeps a command starting with "-" from being read as a flag.
+  const sent = await sys.run(["hc", "send", address, "--", startCommand(p, role)]);
   if (sent.code !== 0) throw new Error(`hc send to ${address} failed: ${sent.err || sent.out}`);
   return address;
 }
 
+/** Kill, then remove, retrying the remove while the terminal is still finishing (as the harness's own close does). */
 export async function close(sys: Sys, address: string): Promise<void> {
   await sys.run(["hc", "kill", address]);
-  await sys.run(["hc", "rm", address]);
+  for (let i = 0; i < 5 && (await sys.run(["hc", "rm", address])).code !== 0; i++) await sys.sleep(200);
 }

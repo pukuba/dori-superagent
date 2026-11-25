@@ -62,6 +62,7 @@ describe("supervisor check", () => {
   });
 
   test("a lead terminal whose agent exited is replaced only after it stays agentless", async () => {
+    await check(m.sys, p); // seen alive once
     m.procs = m.procs.filter((pr) => pr.pid !== 11);
     await check(m.sys, p);
     expect(m.ran("run")).toEqual([]);
@@ -162,6 +163,42 @@ describe("supervisor check", () => {
     m.clock += AGENTLESS_MS + 1;
     await check(m.sys, p);
     expect(leadRuns().length).toBeGreaterThan(MAX_STREAK);
+  });
+
+  test("a configured non-omo agent counts as alive; a terminal never seen alive is never killed", async () => {
+    const q = { ...p, agentCmd: "claude --model x" };
+    m.procs = m.procs.map((pr) => (pr.pid === 11 ? { ...pr, cmd: "/opt/bin/claude --model x" } : pr));
+    m.procs = m.procs.map((pr) => (pr.pid === 21 ? { ...pr, cmd: "/opt/bin/aider" } : pr));
+    await check(m.sys, q);
+    m.clock += GRACE_MS + AGENTLESS_MS;
+    await check(m.sys, q);
+    expect(m.ran("run")).toEqual([]);
+    expect(m.calls.some((c) => c[1] === "kill" && c[2] === "t2")).toBe(false);
+    expect(m.logs.join("\n")).toContain("WARN duty terminal t2 was never seen running its agent");
+  });
+
+  test("a launch that fails is logged and still counted toward the backoff", async () => {
+    m.terms.delete("t1");
+    m.runFails = true;
+    expect(await check(m.sys, p)).toBe(0);
+    expect(m.logs.at(-1)).toContain("ERR relaunch of lead failed");
+    const st = JSON.parse(readFileSync(join(home, "supervisor", "state.json"), "utf8"));
+    expect(st.streak.lead).toBe(1);
+  });
+
+  test("a queued nudge waits out its cooldown; a failed one is retried on the next pass", async () => {
+    writeFileSync(join(home, "telegram.env"), "");
+    const nudges = () => m.calls.filter((c) => c.includes("send") && c.includes("lead")).length;
+    m.sendReply = { code: 0, out: "QUEUED lead" };
+    await check(m.sys, p);
+    await check(m.sys, p);
+    expect(nudges()).toBe(1);
+    expect(m.logs.join("\n")).toContain("queued in the lead's inbox");
+    m.clock += NUDGE_EVERY_MS + 1;
+    m.sendReply = { code: 3, out: "HELD lead: delivery may or may not have reached the pane" };
+    await check(m.sys, p);
+    await check(m.sys, p);
+    expect(nudges()).toBe(3);
   });
 
   test("a pause file stops every repair", async () => {

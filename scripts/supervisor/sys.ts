@@ -17,14 +17,20 @@ export const realSys: Sys = {
       stderr: "pipe",
       env: { ...process.env, ...env },
     });
-    const timer = setTimeout(() => p.kill(), RUN_TIMEOUT_MS);
-    const [out, err, code] = await Promise.all([
-      new Response(p.stdout).text(),
-      new Response(p.stderr).text(),
-      p.exited,
-    ]);
+    const done = Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]).then(
+      ([out, err, code]): RunResult => ({ code, out, err }),
+    );
+    // Resolves at the deadline even if a grandchild still holds the pipes, so one stuck call never stalls supervision.
+    let timer: Timer | undefined;
+    const late = new Promise<RunResult>((resolve) => {
+      timer = setTimeout(() => {
+        p.kill();
+        resolve({ code: 124, out: "", err: `timed out after ${RUN_TIMEOUT_MS / 1000}s: ${argv.join(" ")}` });
+      }, RUN_TIMEOUT_MS);
+    });
+    const result = await Promise.race([done, late]);
     clearTimeout(timer);
-    return { code, out, err };
+    return result;
   },
   now: Date.now,
   sleep: (ms) => Bun.sleep(ms),

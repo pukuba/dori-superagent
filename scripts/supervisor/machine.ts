@@ -11,6 +11,9 @@ export class Machine {
   holder: number | undefined = 1000;
   dead = new Set<number>();
   onRun: () => void = () => {};
+  /** What `dori send` prints, and whether `hc run` fails. */
+  sendReply = { code: 0, out: "DELIVERED lead" };
+  runFails = false;
   logs: string[] = [];
   clock = 1_000_000;
   next = 100;
@@ -44,7 +47,7 @@ export class Machine {
       }
       return ok("");
     }
-    if (a !== "hc") return ok("DELIVERED lead");
+    if (a !== "hc") return { ...this.sendReply, err: "" };
     if (b === "server") return ok(this.holder === undefined ? {} : { holder: { pid: this.holder } });
     if (b === "ls") return ok({ terminals: [...this.terms.keys()].map((address) => ({ address, state: "live" })) });
     if (b === "get") return ok({ ...this.terms.get(c!), address: c });
@@ -54,6 +57,7 @@ export class Machine {
     }
     if (b === "run") {
       this.onRun();
+      if (this.runFails) return { code: 1, out: "", err: "hc: spawn failed" };
       const labels: Record<string, string> = {};
       argv.forEach((v, i) => {
         if (argv[i - 1] === "--label") labels[v.split("=")[0]!] = v.split("=")[1]!;

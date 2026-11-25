@@ -4,7 +4,7 @@
  * restarts, crashes, reboots and lost panes, and restarts the host safely from outside the hc process tree.
  *
  *   main.ts check                     one pass (launchd runs it every 60s)
- *   main.ts install | uninstall       the LaunchAgent dev.dori.supervisor
+ *   main.ts install | uninstall       the LaunchAgent dev.dori.supervisor.<group> (one per dori home)
  *   main.ts pause | resume            stop or resume repairs (a migration, a planned outage)
  *   main.ts restart-host [--text WHY] [--delay S] [--core]
  *                                     restart Herdr Core (or with --core the hc core) from a detached launchd job,

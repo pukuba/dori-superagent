@@ -26,7 +26,15 @@ export function plist(p: Paths, label: string, args: readonly string[], extra: s
     "/usr/sbin",
     "/sbin",
   ];
-  const env = { PATH: path.join(":"), HOME: homedir(), DORI_HOME: p.home, SHELL: p.shell };
+  const env = {
+    PATH: path.join(":"),
+    HOME: homedir(),
+    DORI_HOME: p.home,
+    SHELL: p.shell,
+    // So the supervisor detects and relaunches the same agent and dori command this home was set up with.
+    DORI_AGENT_CMD: p.agentCmd,
+    DORI_CMD: p.doriCmd,
+  };
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>

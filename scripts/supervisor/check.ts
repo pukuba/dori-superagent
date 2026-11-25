@@ -29,6 +29,7 @@ export const BACKOFF_MS = 30 * 60_000;
 export const RESTART_WINDOW_MS = 6 * 60_000;
 const LOCK_STALE_MS = 10 * 60_000;
 const NOTE_FRESH_MS = 30 * 60_000;
+/** The same summary line is logged again at most this often. */
 const OK_LOG_EVERY_MS = 60 * 60_000;
 
 const said = (sys: Sys, line: string, code: number): number => {
@@ -95,15 +96,30 @@ export async function check(
   }
 }
 
-/** mkdir is the lock; a stale one is removed and taken over, and only the pass whose mkdir succeeds proceeds. */
+/**
+ * mkdir is the lock. A stale one is moved aside under a unique name (rename is atomic, so two passes cannot both move
+ * the same lock) and mkdir is retried; only the pass whose mkdir succeeds proceeds. A lock that vanishes mid-look is retried.
+ */
 function takeLock(lock: string, sys: Sys): boolean {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       mkdirSync(lock);
       return true;
     } catch {
-      if (attempt > 0 || sys.now() - statSync(lock).mtimeMs < LOCK_STALE_MS) return false;
-      rmdirSync(lock);
+      let age: number;
+      try {
+        age = sys.now() - statSync(lock).mtimeMs;
+      } catch {
+        continue;
+      }
+      if (age < LOCK_STALE_MS) return false;
+      const aside = `${lock}.stale-${process.pid}-${sys.now()}`;
+      try {
+        renameSync(lock, aside);
+        rmdirSync(aside);
+      } catch {
+        // another pass moved it first; the next mkdir decides
+      }
     }
   }
   return false;
@@ -115,12 +131,21 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
     return said(sys, `SKIP runtime is ${runtime}; the supervisor handles hc`, 0);
   if (!(await hcUp(sys))) {
     sys.log("REPAIR hc core is down: hc server start");
-    await sys.run(["hc", "server", "start"]);
+    // Output to /dev/null: a core that daemonizes must not hold this pass's pipes open.
+    await sys.run(["/bin/sh", "-c", "hc server start >/dev/null 2>&1 </dev/null"]);
     for (let i = 0; i < 30 && !(await hcUp(sys)); i++) await sys.sleep(2000);
     if (!(await hcUp(sys))) return said(sys, "ERR hc core did not come up", 1);
   }
   const stateFile = join(supervisorDir(p), "state.json");
   const st = readJson<State>(stateFile, { launched: {}, agentless: {} });
+  try {
+    return await repair(sys, p, reason, st);
+  } finally {
+    writeFileSync(stateFile, `${JSON.stringify(st)}\n`);
+  }
+}
+
+async function repair(sys: Sys, p: Paths, reason: string | undefined, st: State): Promise<number> {
   st.streak ??= {};
   const streak = st.streak;
   const group = groupId(p.home);
@@ -130,9 +155,12 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
   const now = sys.now();
   const actions: string[] = [];
   let lead: Term | undefined;
+  // Terminals seen alive by an earlier pass, or opened by this supervisor: only those are ever replaced when agentless.
+  const seen = new Set((st.seen ?? []).filter((a) => terms.some((t) => t.address === a)));
   for (const role of ROLES) {
     const mine = terms.filter((t) => t.labels["dori.role"] === role);
-    const live = mine.filter((t) => alive(t, role, procs));
+    const live = mine.filter((t) => alive(t, role, procs, p.agentCmd));
+    for (const t of live) seen.add(t.address);
     if (live.length > 0) {
       const keep = live.find((t) => roles[role] === `hc:${t.address}`) ?? live[0]!;
       if (roles[role] !== `hc:${keep.address}`) {
@@ -154,6 +182,13 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
       );
       continue;
     }
+    const unknown = mine.filter((t) => !seen.has(t.address));
+    if (unknown.length > 0) {
+      actions.push(
+        `WARN ${role} terminal ${unknown.map((t) => t.address).join(" ")} was never seen running its agent; leaving it alone`,
+      );
+      continue;
+    }
     if (mine.length > 0) {
       st.agentless[role] ??= now;
       const since = st.agentless[role];
@@ -169,26 +204,32 @@ async function pass(sys: Sys, p: Paths, reason: string | undefined): Promise<num
       mine.length > 0
         ? `its terminal ${mine.map((t) => `hc:${t.address}`).join(" ")} had no agent running for ${Math.round((now - st.agentless[role]!) / 1000)}s`
         : `no live ${role} terminal (registered as ${roles[role] ?? "-"})`;
-    if (role === "lead") writeHandoff(p, reason ? `${reason}; ${why}` : why, sys);
-    const address = await launch(sys, p, group, role);
-    setRole(p, role, address);
+    // Counted before the launch, so a launch that throws still moves the role toward its backoff and the owner's alert.
     st.launched[role] = now;
     delete st.agentless[role];
     streak[role] = (streak[role] ?? 0) + 1;
-    actions.push(`RELAUNCH ${role}=hc:${address} (${why})`);
+    try {
+      if (role === "lead") writeHandoff(p, reason ? `${reason}; ${why}` : why, sys);
+      const address = await launch(sys, p, group, role);
+      seen.add(address);
+      setRole(p, role, address);
+      actions.push(`RELAUNCH ${role}=hc:${address} (${why})`);
+    } catch (e) {
+      actions.push(`ERR relaunch of ${role} failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     if (streak[role] === MAX_STREAK) {
       const msg = `dori supervisor: the ${role} session was relaunched ${MAX_STREAK} times in a row and its agent never started. It now retries every ${BACKOFF_MS / 60_000} minutes. Last reason: ${why}. Log: ~/Library/Logs/dori-supervisor.log`;
       actions.push(`ERR ${role} keeps failing to start; ${await alertOwner(sys, p, msg)}`);
     }
   }
+  st.seen = [...seen];
   actions.push(...(await tendListeners(sys, p, st, terms, procs, lead, now)));
   const summary =
     actions.length > 0 ? actions.join("; ") : `OK ${ROLES.map((r) => `${r}=${roles[r] ?? "-"}`).join(" ")}`;
-  if (actions.length > 0 || summary !== st.lastSummary || now - (st.lastLogAt ?? 0) > OK_LOG_EVERY_MS) {
+  if (summary !== st.lastSummary || now - (st.lastLogAt ?? 0) > OK_LOG_EVERY_MS) {
     sys.log(summary);
     st.lastSummary = summary;
     st.lastLogAt = now;
   }
-  writeFileSync(stateFile, `${JSON.stringify(st)}\n`);
   return 0;
 }

@@ -61,7 +61,16 @@ export async function tendListeners(
   const r = await sys.run([p.bun, join(p.repo, "src", "cli.ts"), "send", "lead", "--text", text], {
     DORI_HOME: p.home,
   });
-  st.nudgedAt = now;
-  out.push(`NUDGE lead to arm ${missing.join(",")}: ${(r.out || r.err).trim().split("\n")[0] ?? r.code}`);
+  const reply = `${r.out}\n${r.err}`;
+  // DELIVERED reached the lead. QUEUED waits in its inbox, and sending again would only queue a duplicate, so it
+  // also starts the cooldown, but loudly. Anything else (HELD, an error) did not land: the next pass tries again.
+  if (/^DELIVERED /m.test(reply)) {
+    st.nudgedAt = now;
+    out.push(`NUDGE lead to arm ${missing.join(",")}: delivered`);
+  } else if (/^QUEUED /m.test(reply)) {
+    st.nudgedAt = now;
+    out.push(`WARN nudge to arm ${missing.join(",")} is queued in the lead's inbox, not delivered`);
+  } else
+    out.push(`WARN nudge to arm ${missing.join(",")} failed (exit ${r.code}): ${reply.trim().split("\n")[0] ?? ""}`);
   return out;
 }

@@ -9,6 +9,8 @@ export type State = {
   agentless: Partial<Record<Role, number>>;
   /** Relaunches in a row whose agent never came up; cleared when the role is seen alive. */
   streak?: Partial<Record<Role, number>>;
+  /** Addresses seen running their agent, or opened by the supervisor; only these are replaced when agentless. */
+  seen?: string[];
   nudgedAt?: number;
   lastSummary?: string;
   lastLogAt?: number;
